@@ -1,0 +1,76 @@
+# Isengard Worker Dockerfile (GPU)
+#
+# For production training with AI-Toolkit on NVIDIA GPUs.
+# Requires: nvidia-docker runtime, 24GB+ VRAM
+#
+# Build: docker build -f Dockerfile.gpu -t isengard-worker-gpu .
+# Run: docker run --gpus all -e HF_TOKEN=xxx isengard-worker-gpu
+
+# CUDA 12.4 with Python 3.11
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python 3.11 and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    git \
+    curl \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.11 the default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Upgrade pip and install uv
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir uv
+
+WORKDIR /app
+
+# Install PyTorch with CUDA 12.4 support first
+RUN uv pip install --system \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Install AI-Toolkit
+RUN uv pip install --system ostris-ai-toolkit
+
+# Copy shared packages
+COPY packages/ /app/packages/
+
+# Copy worker requirements and install
+COPY apps/worker/requirements.txt /app/apps/worker/requirements.txt
+RUN uv pip install --system -r /app/apps/worker/requirements.txt
+
+# Install additional dependencies for training
+RUN uv pip install --system \
+    accelerate \
+    transformers \
+    diffusers \
+    safetensors \
+    bitsandbytes \
+    peft \
+    huggingface_hub \
+    pyyaml
+
+# Copy worker source
+COPY apps/worker/src/ /app/apps/worker/src/
+
+# Set environment
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_VISIBLE_DEVICES=0
+
+# HuggingFace cache in persistent volume
+ENV HF_HOME=/data/cache/huggingface
+ENV TRANSFORMERS_CACHE=/data/cache/huggingface
+
+# Run worker
+CMD ["python", "-m", "apps.worker.src.main"]

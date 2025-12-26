@@ -438,7 +438,7 @@ curl http://localhost:8000/api/training/{job_id}
 
 ---
 
-## M3: Training Integration
+## M3: Training Integration (IMPLEMENTED)
 
 ### Scope
 - Integrate AI-Toolkit for real LoRA training
@@ -447,29 +447,43 @@ curl http://localhost:8000/api/training/{job_id}
 - Progress parsing from AI-Toolkit logs
 
 ### Acceptance Criteria
-- [ ] AI-Toolkit installed in worker container
-- [ ] FLUX.1-dev model downloadable via script
-- [ ] Training produces valid .safetensors file
-- [ ] Progress updates parsed from stdout
-- [ ] Training can be cancelled (SIGTERM)
-- [ ] Trained LoRA loadable in generation
+- [x] AI-Toolkit installed in worker container (Dockerfile.gpu)
+- [x] FLUX.1-dev model downloadable via script (scripts/download_models.py)
+- [x] Training produces valid .safetensors file (AI-Toolkit output)
+- [x] Progress updates parsed from stdout (regex patterns for step/loss)
+- [x] Training can be cancelled (SIGTERM handling)
+- [ ] Trained LoRA loadable in generation (M4: ComfyUI Integration)
 
 ### Prerequisites
 - GPU-enabled Docker host (RTX 3090/A5000+ with 24GB VRAM)
 - FLUX.1-dev model access (HuggingFace)
 - AI-Toolkit tested standalone
 
+### Implementation Notes
+- `packages/plugins/training/src/ai_toolkit.py` - Full AI-Toolkit integration
+- `scripts/download_models.py` - Model download utility
+- `apps/worker/Dockerfile.gpu` - GPU-enabled worker container
+- `docker-compose.gpu.yaml` - Production compose with GPU support
+
 ### Technical Approach
-1. Create AI-Toolkit config YAML generator from TrainingConfig
-2. Launch training via subprocess
-3. Parse stdout regex for progress (step, loss)
-4. Handle SIGTERM for cancellation
-5. Validate output .safetensors format
+1. Create AI-Toolkit config YAML generator from TrainingConfig ✓
+2. Launch training via subprocess ✓
+3. Parse stdout regex for progress (step, loss) ✓
+4. Handle SIGTERM for cancellation ✓
+5. Validate output .safetensors format ✓
 
 ### Validation Commands
 ```bash
-ISENGARD_MODE=production docker-compose up worker
-docker-compose logs -f worker
+# Download models first
+HF_TOKEN=xxx python scripts/download_models.py --check-gpu
+
+# Start GPU worker
+docker-compose -f docker-compose.gpu.yaml up worker
+
+# Monitor logs
+docker-compose -f docker-compose.gpu.yaml logs -f worker
+
+# Check outputs
 ls -la data/loras/
 ```
 

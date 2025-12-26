@@ -1,0 +1,105 @@
+# Isengard Docker Compose - GPU Production
+#
+# Usage:
+#   docker-compose -f docker-compose.gpu.yaml up
+#   docker-compose -f docker-compose.gpu.yaml up worker  # Start only worker
+#
+# Requirements:
+#   - nvidia-docker runtime installed
+#   - GPU with 24GB+ VRAM
+#   - HF_TOKEN environment variable set
+#   - FLUX.1-dev model downloaded
+#
+# Environment:
+#   HF_TOKEN=xxx                    # HuggingFace token (required)
+#   VOLUME_ROOT=./data              # Override data storage location
+
+version: '3.8'
+
+services:
+  # Redis for job queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend API
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ISENGARD_MODE=production
+      - REDIS_URL=redis://redis:6379
+      - USE_REDIS=true
+      - VOLUME_ROOT=/data
+      - LOG_DIR=/logs
+      - LOG_LEVEL=INFO
+    volumes:
+      - ${VOLUME_ROOT:-./data}:/data
+      - ./logs:/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # GPU Worker for training and generation
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile.gpu
+    environment:
+      - ISENGARD_MODE=production
+      - REDIS_URL=redis://redis:6379
+      - VOLUME_ROOT=/data
+      - LOG_DIR=/logs
+      - LOG_LEVEL=INFO
+      - HF_TOKEN=${HF_TOKEN}
+      - WORKER_NAME=${WORKER_NAME:-worker-1}
+    volumes:
+      - ${VOLUME_ROOT:-./data}:/data
+      - ./logs:/logs
+      # HuggingFace cache persisted
+      - hf_cache:/data/cache/huggingface
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    # GPU allocation
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Frontend
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://api:8000
+    depends_on:
+      - api
+
+volumes:
+  redis_data:
+  hf_cache:
