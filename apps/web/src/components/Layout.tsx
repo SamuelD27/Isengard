@@ -1,80 +1,170 @@
-import { ReactNode } from 'react'
+import { ReactNode, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
-import { Users, Zap, Image, Video, Settings } from 'lucide-react'
+import {
+  Users,
+  Zap,
+  Image,
+  Video,
+  ChevronLeft,
+  ChevronRight,
+  Cpu,
+  Activity,
+} from 'lucide-react'
 
 interface LayoutProps {
   children: ReactNode
 }
 
 const navItems = [
-  { path: '/characters', label: 'Characters', icon: Users },
-  { path: '/training', label: 'Training', icon: Zap },
-  { path: '/generate', label: 'Image Gen', icon: Image },
-  { path: '/video', label: 'Video', icon: Video, badge: 'Soon' },
+  {
+    path: '/characters',
+    label: 'Characters',
+    icon: Users,
+    description: 'Manage identities',
+  },
+  {
+    path: '/training',
+    label: 'Training',
+    icon: Zap,
+    description: 'Train LoRA models',
+  },
+  {
+    path: '/generate',
+    label: 'Generate',
+    icon: Image,
+    description: 'Create images',
+  },
+  {
+    path: '/video',
+    label: 'Video',
+    icon: Video,
+    description: 'Coming soon',
+    disabled: true,
+  },
 ]
 
 export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
+  const [collapsed, setCollapsed] = useState(false)
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex h-14 items-center">
-          <div className="mr-4 flex">
-            <Link to="/" className="mr-6 flex items-center space-x-2">
-              <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
-                <span className="text-primary-foreground font-bold text-lg">I</span>
-              </div>
-              <span className="font-bold text-xl">Isengard</span>
-            </Link>
-          </div>
+    <div className="flex h-screen bg-background overflow-hidden">
+      {/* Sidebar */}
+      <aside
+        className={cn(
+          "flex flex-col bg-background-secondary border-r border-border transition-all duration-200",
+          collapsed ? "w-16" : "w-56"
+        )}
+      >
+        {/* Logo */}
+        <div className="flex items-center h-14 px-4 border-b border-border">
+          <Link to="/" className="flex items-center gap-3 overflow-hidden">
+            <div className="flex-shrink-0 w-8 h-8 rounded bg-gradient-to-br from-accent to-primary flex items-center justify-center">
+              <Cpu className="w-4 h-4 text-white" />
+            </div>
+            {!collapsed && (
+              <span className="font-semibold text-foreground tracking-tight">
+                Isengard
+              </span>
+            )}
+          </Link>
+        </div>
 
-          <nav className="flex items-center space-x-6 text-sm font-medium">
-            {navItems.map((item) => (
+        {/* Navigation */}
+        <nav className="flex-1 py-4 px-2 space-y-1 overflow-y-auto">
+          {navItems.map((item) => {
+            const isActive = location.pathname === item.path
+            return (
               <Link
                 key={item.path}
-                to={item.path}
+                to={item.disabled ? '#' : item.path}
                 className={cn(
-                  "flex items-center gap-2 transition-colors hover:text-foreground/80",
-                  location.pathname === item.path
-                    ? "text-foreground"
-                    : "text-foreground/60"
+                  "flex items-center gap-3 px-3 py-2.5 rounded-md transition-all group",
+                  isActive
+                    ? "bg-accent-soft text-accent"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                  item.disabled && "opacity-50 cursor-not-allowed"
                 )}
+                onClick={(e) => item.disabled && e.preventDefault()}
               >
-                <item.icon className="h-4 w-4" />
-                {item.label}
-                {item.badge && (
-                  <span className="text-xs bg-muted px-1.5 py-0.5 rounded text-muted-foreground">
-                    {item.badge}
+                <item.icon
+                  className={cn(
+                    "w-5 h-5 flex-shrink-0",
+                    isActive ? "text-accent" : "text-muted-foreground group-hover:text-foreground"
+                  )}
+                />
+                {!collapsed && (
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-sm font-medium truncate">
+                      {item.label}
+                    </span>
+                    <span className="text-xs text-muted-foreground truncate">
+                      {item.description}
+                    </span>
+                  </div>
+                )}
+                {!collapsed && item.disabled && (
+                  <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                    Soon
                   </span>
                 )}
               </Link>
-            ))}
-          </nav>
+            )
+          })}
+        </nav>
 
-          <div className="flex flex-1 items-center justify-end space-x-2">
-            <button className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-10 w-10">
-              <Settings className="h-4 w-4" />
-              <span className="sr-only">Settings</span>
-            </button>
+        {/* Status Footer */}
+        <div className="px-3 py-3 border-t border-border">
+          {!collapsed ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Activity className="w-3.5 h-3.5 text-success" />
+              <span>System Ready</span>
+            </div>
+          ) : (
+            <div className="flex justify-center">
+              <Activity className="w-4 h-4 text-success" />
+            </div>
+          )}
+        </div>
+
+        {/* Collapse Toggle */}
+        <button
+          onClick={() => setCollapsed(!collapsed)}
+          className="flex items-center justify-center h-10 border-t border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        >
+          {collapsed ? (
+            <ChevronRight className="w-4 h-4" />
+          ) : (
+            <ChevronLeft className="w-4 h-4" />
+          )}
+        </button>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Top Bar */}
+        <header className="flex items-center justify-between h-14 px-6 border-b border-border bg-background-secondary">
+          <div className="flex items-center gap-4">
+            <h1 className="text-lg font-medium text-foreground">
+              {navItems.find((item) => item.path === location.pathname)?.label || 'Dashboard'}
+            </h1>
           </div>
-        </div>
-      </header>
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-success pulse-dot" />
+              GPU Connected
+            </span>
+          </div>
+        </header>
 
-      {/* Main content */}
-      <main className="container py-6">
-        {children}
-      </main>
-
-      {/* Footer */}
-      <footer className="border-t py-6">
-        <div className="container flex items-center justify-between text-sm text-muted-foreground">
-          <p>Isengard v0.1.0</p>
-          <p>Identity LoRA Training Platform</p>
-        </div>
-      </footer>
+        {/* Page Content */}
+        <main className="flex-1 overflow-y-auto">
+          <div className="p-6 max-w-7xl">
+            {children}
+          </div>
+        </main>
+      </div>
     </div>
   )
 }

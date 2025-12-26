@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Wand2, Settings2, Image } from 'lucide-react'
+import { Wand2, ChevronDown, ChevronUp, Image } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -55,55 +55,53 @@ export default function ImageGenPage() {
   const selectedChar = characters.find(c => c.id === config.lora_id)
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 fade-in">
+      {/* Page Header */}
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Image Generation</h1>
-        <p className="text-muted-foreground">
-          Generate images using your trained LoRA models
+        <p className="text-sm text-muted-foreground">
+          Create images with trained LoRA models
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Generation Form */}
+        {/* Generation Form - 2 cols */}
         <Card className="lg:col-span-2">
           <CardHeader>
             <CardTitle>Generate Images</CardTitle>
-            <CardDescription>
-              Write a prompt and optionally select a character LoRA
-            </CardDescription>
+            <CardDescription>Write a prompt and configure settings</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-5">
             {/* Prompt */}
             <div className="space-y-2">
               <Label htmlFor="prompt">Prompt</Label>
               <textarea
                 id="prompt"
-                className="flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex min-h-[100px] w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-accent resize-none"
                 placeholder="Describe what you want to generate..."
                 value={config.prompt}
                 onChange={(e) => setConfig({ ...config, prompt: e.target.value })}
               />
               {selectedChar && (
                 <p className="text-xs text-muted-foreground">
-                  Tip: Include the trigger word "<code className="bg-muted px-1 rounded">{selectedChar.trigger_word}</code>" in your prompt
+                  Include trigger word: <code className="text-accent">{selectedChar.trigger_word}</code>
                 </p>
               )}
             </div>
 
-            {/* Character LoRA Selection */}
+            {/* LoRA Selection */}
             <div className="space-y-2">
-              <Label>Character LoRA (optional)</Label>
+              <Label>Character LoRA</Label>
               {trainedCharacters.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No trained LoRAs available. Train a character first.
+                <p className="text-sm text-muted-foreground py-1">
+                  No trained LoRAs available
                 </p>
               ) : (
                 <select
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
                   value={config.lora_id || ''}
                   onChange={(e) => setConfig({ ...config, lora_id: e.target.value || null })}
                 >
-                  <option value="">No LoRA (base model only)</option>
+                  <option value="">Base model only</option>
                   {trainedCharacters.map((char) => (
                     <option key={char.id} value={char.id}>
                       {char.name} ({char.trigger_word})
@@ -113,30 +111,30 @@ export default function ImageGenPage() {
               )}
             </div>
 
-            {/* Basic Settings Row */}
+            {/* Basic Settings */}
             <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2">
                 <Label htmlFor="size">Size</Label>
                 <select
                   id="size"
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
                   value={`${config.width}x${config.height}`}
                   onChange={(e) => {
                     const [w, h] = e.target.value.split('x').map(Number)
                     setConfig({ ...config, width: w, height: h })
                   }}
                 >
-                  <option value="1024x1024">1024 x 1024 (Square)</option>
-                  <option value="1024x768">1024 x 768 (Landscape)</option>
-                  <option value="768x1024">768 x 1024 (Portrait)</option>
-                  <option value="512x512">512 x 512 (Small)</option>
+                  <option value="1024x1024">1024x1024</option>
+                  <option value="1024x768">1024x768</option>
+                  <option value="768x1024">768x1024</option>
+                  <option value="512x512">512x512</option>
                 </select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="count">Count</Label>
                 <select
                   id="count"
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
                   value={count}
                   onChange={(e) => setCount(parseInt(e.target.value))}
                 >
@@ -147,7 +145,7 @@ export default function ImageGenPage() {
               </div>
               {config.lora_id && (
                 <div className="space-y-2">
-                  <Label htmlFor="strength">LoRA Strength</Label>
+                  <Label htmlFor="strength">Strength</Label>
                   <Input
                     id="strength"
                     type="number"
@@ -162,25 +160,23 @@ export default function ImageGenPage() {
             </div>
 
             {/* Advanced Toggle */}
-            <Button
-              variant="ghost"
-              size="sm"
+            <button
               onClick={() => setShowAdvanced(!showAdvanced)}
-              className="text-muted-foreground"
+              className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
-              <Settings2 className="mr-2 h-4 w-4" />
-              {showAdvanced ? 'Hide' : 'Show'} Advanced Settings
-            </Button>
+              {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              Advanced Settings
+            </button>
 
             {/* Advanced Settings */}
             {showAdvanced && (
-              <div className="space-y-4 border-t pt-4">
+              <div className="space-y-4 pt-2 border-t border-border">
                 <div className="space-y-2">
                   <Label htmlFor="negative">Negative Prompt</Label>
                   <textarea
                     id="negative"
-                    className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    placeholder="What to avoid in the image..."
+                    className="flex min-h-[60px] w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent resize-none"
+                    placeholder="What to avoid..."
                     value={config.negative_prompt}
                     onChange={(e) => setConfig({ ...config, negative_prompt: e.target.value })}
                   />
@@ -198,7 +194,7 @@ export default function ImageGenPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="cfg">Guidance Scale</Label>
+                    <Label htmlFor="cfg">Guidance</Label>
                     <Input
                       id="cfg"
                       type="number"
@@ -210,7 +206,7 @@ export default function ImageGenPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="seed">Seed (optional)</Label>
+                    <Label htmlFor="seed">Seed</Label>
                     <Input
                       id="seed"
                       type="number"
@@ -223,7 +219,7 @@ export default function ImageGenPage() {
               </div>
             )}
           </CardContent>
-          <CardFooter>
+          <CardFooter className="border-t border-border pt-5">
             <Button
               className="w-full"
               disabled={!config.prompt.trim() || generateMutation.isPending}
@@ -235,10 +231,10 @@ export default function ImageGenPage() {
           </CardFooter>
         </Card>
 
-        {/* Recent Generations */}
+        {/* Recent Jobs - 1 col */}
         <Card>
           <CardHeader>
-            <CardTitle>Recent Generations</CardTitle>
+            <CardTitle>Recent</CardTitle>
           </CardHeader>
           <CardContent>
             {jobs.length === 0 ? (
@@ -246,8 +242,8 @@ export default function ImageGenPage() {
                 No generations yet
               </p>
             ) : (
-              <div className="space-y-4">
-                {jobs.slice(0, 5).map((job) => (
+              <div className="space-y-3">
+                {jobs.slice(0, 6).map((job) => (
                   <GenerationJobItem key={job.id} job={job} />
                 ))}
               </div>
@@ -260,32 +256,30 @@ export default function ImageGenPage() {
 }
 
 function GenerationJobItem({ job }: { job: GenerationJob }) {
-  const statusColors: Record<string, string> = {
-    pending: 'bg-yellow-100 text-yellow-800',
-    queued: 'bg-blue-100 text-blue-800',
-    running: 'bg-green-100 text-green-800',
-    completed: 'bg-green-100 text-green-800',
-    failed: 'bg-red-100 text-red-800',
+  const statusClasses: Record<string, string> = {
+    pending: 'status-badge status-pending',
+    queued: 'status-badge status-running',
+    running: 'status-badge status-running',
+    completed: 'status-badge status-success',
+    failed: 'status-badge status-error',
   }
 
   return (
-    <div className="border rounded-lg p-3">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-muted-foreground">{job.id}</span>
-        <span className={`text-xs px-2 py-0.5 rounded-full ${statusColors[job.status]}`}>
-          {job.status}
+    <div className="rounded-md border border-border p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground font-mono truncate max-w-[120px]">
+          {job.id}
         </span>
+        <span className={statusClasses[job.status]}>{job.status}</span>
       </div>
-      <p className="text-sm truncate mb-2">{job.config.prompt}</p>
+      <p className="text-sm text-foreground truncate">{job.config.prompt}</p>
       {job.status === 'running' && (
-        <Progress value={job.progress} className="h-2" />
+        <Progress value={job.progress} className="h-1.5" />
       )}
       {job.status === 'completed' && job.output_paths.length > 0 && (
-        <div className="flex items-center gap-2 mt-2">
-          <Image className="h-4 w-4 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground">
-            {job.output_paths.length} image(s)
-          </span>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Image className="h-3.5 w-3.5" />
+          <span>{job.output_paths.length} image(s)</span>
         </div>
       )}
     </div>
