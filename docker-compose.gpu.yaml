@@ -44,6 +44,7 @@ services:
       - VOLUME_ROOT=/data
       - LOG_DIR=/logs
       - LOG_LEVEL=INFO
+      - COMFYUI_URL=http://comfyui:8188
     volumes:
       - ${VOLUME_ROOT:-./data}:/data
       - ./logs:/logs
@@ -69,6 +70,7 @@ services:
       - LOG_LEVEL=INFO
       - HF_TOKEN=${HF_TOKEN}
       - WORKER_NAME=${WORKER_NAME:-worker-1}
+      - COMFYUI_URL=http://comfyui:8188
     volumes:
       - ${VOLUME_ROOT:-./data}:/data
       - ./logs:/logs
@@ -79,6 +81,8 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+      comfyui:
+        condition: service_healthy
     # GPU allocation
     deploy:
       resources:
@@ -87,6 +91,30 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  # ComfyUI for image generation
+  comfyui:
+    image: ghcr.io/ai-dock/comfyui:latest
+    ports:
+      - "8188:8188"
+    environment:
+      - COMFYUI_PORT=8188
+    volumes:
+      - ${VOLUME_ROOT:-./data}/comfyui/models:/opt/ComfyUI/models
+      - ${VOLUME_ROOT:-./data}/comfyui/output:/opt/ComfyUI/output
+      - ${VOLUME_ROOT:-./data}/comfyui/workflows:/opt/ComfyUI/workflows
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8188/system_stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Frontend
   web:
@@ -103,3 +131,4 @@ services:
 volumes:
   redis_data:
   hf_cache:
+  comfyui_models:
