@@ -1,0 +1,87 @@
+# Isengard .gitignore
+
+# ============================================
+# Large artifacts / Data (LOCAL DEV ONLY)
+# ============================================
+data/
+tmp/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Keep logs structure but ignore contents
+logs/**/*.log
+logs/**/*.json
+!logs/.gitkeep
+
+# ============================================
+# Environment / Secrets
+# ============================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ============================================
+# Node / TypeScript
+# ============================================
+node_modules/
+.next/
+.nuxt/
+dist/
+*.tsbuildinfo
+.npm
+.yarn-integrity
+
+# ============================================
+# IDE / Editor
+# ============================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================
+# Docker
+# ============================================
+*.log
+docker-compose.override.yml

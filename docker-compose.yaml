@@ -1,0 +1,111 @@
+# Isengard Docker Compose - Local Development
+#
+# Usage:
+#   docker-compose up              # Start all services
+#   docker-compose up --build      # Rebuild and start
+#   docker-compose up -d           # Start in background
+#   docker-compose logs -f api     # Follow API logs
+#
+# Environment:
+#   ISENGARD_MODE=fast-test        # Default: mock plugins, no GPU
+#   ISENGARD_MODE=production       # Full training/generation (requires GPU)
+
+version: '3.8'
+
+services:
+  # Redis for job queue
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Backend API
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ISENGARD_MODE=${ISENGARD_MODE:-fast-test}
+      - REDIS_URL=redis://redis:6379
+      - DATA_DIR=/data
+      - LOG_DIR=/logs
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+      - ./packages:/app/packages:ro
+      - ./apps/api/src:/app/apps/api/src:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # For development: enable hot reload
+    command: uvicorn apps.api.src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Background worker
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      - ISENGARD_MODE=${ISENGARD_MODE:-fast-test}
+      - REDIS_URL=redis://redis:6379
+      - DATA_DIR=/data
+      - LOG_DIR=/logs
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+      - ./packages:/app/packages:ro
+      - ./apps/worker/src:/app/apps/worker/src:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  # Frontend (development mode with hot reload)
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: builder
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    command: npm run dev -- --host
+    depends_on:
+      - api
+
+volumes:
+  redis_data:
+
+# GPU support for production mode
+# Uncomment the following to enable GPU for worker:
+#
+# services:
+#   worker:
+#     deploy:
+#       resources:
+#         reservations:
+#           devices:
+#             - driver: nvidia
+#               count: 1
+#               capabilities: [gpu]

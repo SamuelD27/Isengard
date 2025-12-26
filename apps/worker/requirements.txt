@@ -1,0 +1,20 @@
+# Isengard Worker Dependencies
+
+# Async support
+asyncio-redis>=0.16.0
+redis>=5.0.0,<6.0.0
+
+# HTTP client (for ComfyUI API)
+httpx>=0.26.0,<1.0.0
+
+# Validation
+pydantic>=2.5.0,<3.0.0
+
+# File handling
+aiofiles>=23.0.0,<24.0.0
+
+# Graceful shutdown
+anyio>=4.0.0,<5.0.0
+
+# UUID
+uuid7>=0.1.0,<1.0.0

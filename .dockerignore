@@ -1,0 +1,55 @@
+# Isengard .dockerignore
+# Keep Docker context clean and fast
+
+# Large artifacts - NEVER send to Docker daemon
+data/
+tmp/
+logs/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+.env.*
+*.pem
+*.key
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node artifacts
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Reports and docs (not needed in container)
+reports/
+*.md
+!README.md
+
+# Development files
+*.log
+docker-compose*.yml
+Makefile

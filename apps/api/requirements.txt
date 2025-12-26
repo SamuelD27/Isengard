@@ -1,0 +1,27 @@
+# Isengard API Dependencies
+
+# Web framework
+fastapi>=0.109.0,<1.0.0
+uvicorn[standard]>=0.27.0,<1.0.0
+
+# Validation and settings
+pydantic>=2.5.0,<3.0.0
+pydantic-settings>=2.1.0,<3.0.0
+
+# Async HTTP client
+httpx>=0.26.0,<1.0.0
+
+# Redis for job queue
+redis>=5.0.0,<6.0.0
+
+# Server-sent events
+sse-starlette>=1.8.0,<3.0.0
+
+# CORS
+python-multipart>=0.0.6,<1.0.0
+
+# File handling
+aiofiles>=23.0.0,<24.0.0
+
+# UUID generation
+uuid7>=0.1.0,<1.0.0
