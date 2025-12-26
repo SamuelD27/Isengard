@@ -1,113 +1,139 @@
 # Isengard RunPod Pod Template
 #
-# Deploy a GPU worker on RunPod for training and generation.
+# Complete GPU pod with SSH, ComfyUI, API, and Worker.
+#
+# Features:
+# - SSH access on port 22
+# - Automatic model downloads (FLUX.1-dev, FLUX.1-schnell)
+# - ComfyUI on port 8188
+# - Isengard API on port 8000
+# - Redis for job queue
+# - Persistent storage on network volume
 #
 # Prerequisites:
-# - RunPod account with API key
-# - HuggingFace account with access to FLUX.1-dev
-# - Network volume created on RunPod (recommended: 100GB+)
+# 1. Build and push the Docker image:
+#    docker build -t ghcr.io/samueld27/isengard-runpod:latest -f deploy/runpod/Dockerfile .
+#    docker push ghcr.io/samueld27/isengard-runpod:latest
 #
-# Usage:
-#   1. Create a network volume on RunPod
-#   2. Replace placeholders below
-#   3. Deploy via RunPod API or CLI
+# 2. Create a RunPod network volume (100GB+ recommended)
+#
+# 3. Set environment variables in RunPod template
 
-apiVersion: v1
-kind: Template
-metadata:
-  name: isengard-worker
-  description: GPU worker for LoRA training and image generation
+name: isengard-gpu
+description: "Isengard - Identity LoRA Training + Image Generation"
 
-spec:
-  # Container configuration
-  container:
-    image: ghcr.io/samueld27/isengard-worker-gpu:latest
-    # Alternative: build and push your own
-    # image: your-registry/isengard-worker-gpu:latest
+# Docker image
+image: ghcr.io/samueld27/isengard-runpod:latest
 
-  # GPU requirements
-  gpu:
-    # Options: RTX_4090, A100_80GB, A100_40GB, A6000
-    # Training requires 24GB+ VRAM
-    type: RTX_4090
-    count: 1
+# GPU Configuration
+gpu:
+  # Recommended: RTX 4090 (24GB) or A100 (40GB/80GB)
+  # Minimum: RTX 3090 (24GB)
+  type: RTX_4090
+  count: 1
 
-  # Network volume for persistent storage
-  volume:
-    # Create at: https://www.runpod.io/console/user/storage
-    id: ${RUNPOD_VOLUME_ID}
-    mountPath: /runpod-volume
+# Volume mount for persistent storage
+volume:
+  # Create at: https://www.runpod.io/console/user/storage
+  size: 100  # GB
+  mountPath: /runpod-volume
 
-  # Environment variables
-  env:
-    # Required
-    - name: ISENGARD_MODE
-      value: production
+# Exposed ports
+ports:
+  - port: 22
+    protocol: tcp
+    name: ssh
+  - port: 8000
+    protocol: http
+    name: api
+  - port: 8188
+    protocol: http
+    name: comfyui
 
-    - name: VOLUME_ROOT
-      value: /runpod-volume/isengard
+# Environment variables
+env:
+  # Required: HuggingFace token for FLUX model access
+  - name: HF_TOKEN
+    value: "${HF_TOKEN}"
+    secret: true
 
-    - name: LOG_DIR
-      value: /runpod-volume/isengard/logs
+  # Isengard configuration
+  - name: ISENGARD_MODE
+    value: "production"
 
-    - name: LOG_LEVEL
-      value: INFO
+  - name: VOLUME_ROOT
+    value: "/runpod-volume/isengard"
 
-    - name: HF_TOKEN
-      value: ${HF_TOKEN}
+  - name: LOG_DIR
+    value: "/runpod-volume/isengard/logs"
 
-    # Redis (external service)
-    - name: REDIS_URL
-      value: ${REDIS_URL}
+  - name: LOG_LEVEL
+    value: "INFO"
 
-    # ComfyUI (if running on same pod)
-    - name: COMFYUI_URL
-      value: http://localhost:8188
+  # Redis (local on pod)
+  - name: REDIS_URL
+    value: "redis://localhost:6379"
 
-    # Worker identification
-    - name: WORKER_NAME
-      value: runpod-worker-1
+  # ComfyUI (local on pod)
+  - name: COMFYUI_URL
+    value: "http://localhost:8188"
 
-  # Resource limits
-  resources:
-    cpu: 8
-    memory: 32Gi
+  - name: USE_REDIS
+    value: "true"
 
-  # Health checks
-  readinessProbe:
-    httpGet:
-      path: /health
-      port: 8000
-    initialDelaySeconds: 30
-    periodSeconds: 10
+  # Worker name (for multi-worker setups)
+  - name: WORKER_NAME
+    value: "runpod-worker-1"
 
-  # Ports to expose
-  ports:
-    - containerPort: 8000
-      name: api
-    - containerPort: 8188
-      name: comfyui
+  # Optional: SSH public key for key-based auth
+  # If not set, a random password will be generated on startup
+  # - name: PUBLIC_KEY
+  #   value: "ssh-rsa AAAA..."
+
+# Resource limits
+resources:
+  cpu: 8
+  memory: 32Gi
+
+# Health check
+healthCheck:
+  enabled: true
+  path: /health
+  port: 8000
+  initialDelaySeconds: 120  # Models take time to download
+  periodSeconds: 30
 
 ---
-# Deployment notes:
+# Quick Start Guide
 #
-# Option 1: Single pod with both worker and ComfyUI
-#   - Deploy this template
-#   - ComfyUI runs as sidecar (bundled in image)
-#   - Good for development/testing
+# 1. Deploy the template on RunPod
 #
-# Option 2: Separate pods (recommended for production)
-#   - Deploy worker pod with this template
-#   - Deploy separate ComfyUI pod
-#   - Connect via internal network
-#   - Update COMFYUI_URL accordingly
+# 2. Wait for startup (check logs for "Startup Complete")
+#    - First run downloads ~25GB of models
+#    - Subsequent runs use cached models
 #
-# Initial setup after deployment:
-#   1. SSH into pod
-#   2. Run model download: python scripts/download_models.py
-#   3. Test with: curl localhost:8000/health
+# 3. Access services:
+#    - SSH: ssh root@<pod-ip> (password shown in logs)
+#    - API: http://<pod-ip>:8000/health
+#    - ComfyUI: http://<pod-ip>:8188
 #
-# Monitoring:
-#   - Logs: /runpod-volume/isengard/logs/worker/
-#   - GPU: nvidia-smi
-#   - Jobs: redis-cli -u $REDIS_URL XINFO STREAM isengard:training
+# 4. Test the API:
+#    curl http://<pod-ip>:8000/info
+#    curl http://<pod-ip>:8000/api/characters
+#
+# 5. Check service status:
+#    ssh root@<pod-ip>
+#    # Inside pod:
+#    redis-cli ping
+#    curl localhost:8000/health
+#    curl localhost:8188/system_stats
+#    ps aux | grep python
+#
+# 6. View logs:
+#    tail -f /runpod-volume/isengard/logs/api/startup.log
+#    tail -f /runpod-volume/isengard/logs/worker/startup.log
+#
+# Troubleshooting:
+# - Models not downloading: Check HF_TOKEN is set correctly
+# - Services not starting: Check /runpod-volume/isengard/logs/
+# - GPU not detected: Run nvidia-smi to verify
