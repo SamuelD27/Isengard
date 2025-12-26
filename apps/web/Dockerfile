@@ -6,10 +6,10 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy package files
-COPY apps/web/package.json apps/web/package-lock.json* ./
+COPY apps/web/package.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (use npm install since no lock file exists)
+RUN npm install
 
 # Copy source
 COPY apps/web/ ./

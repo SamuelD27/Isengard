@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Wand2, Settings2, Image, Download } from 'lucide-react'
+import { Wand2, Settings2, Image } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
-import { api, Character, GenerationConfig, GenerationJob } from '@/lib/api'
+import { api, GenerationConfig, GenerationJob } from '@/lib/api'
 
 const defaultConfig: GenerationConfig = {
   prompt: '',
