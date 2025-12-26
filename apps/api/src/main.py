@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import configure_logging, get_logger
 
-from .routes import health, characters, training, generation
+from .routes import health, characters, training, generation, logs
 from .middleware import CorrelationIDMiddleware
 
 logger = get_logger("api.main")
@@ -28,19 +28,29 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     config = get_global_config()
 
-    # Configure logging
-    configure_logging("api")
-    logger.info("Starting Isengard API", extra={
+    # Configure logging (with rotation of previous session)
+    configure_logging("api", rotate=True)
+
+    logger.info("Isengard API starting", extra={
+        "event": "system.startup",
         "mode": config.mode,
-        "data_dir": str(config.data_dir),
+        "volume_root": str(config.volume_root),
+        "api_host": config.api_host,
+        "api_port": config.api_port,
     })
 
     # Ensure directories exist
     config.ensure_directories()
 
+    logger.info("Isengard API ready", extra={
+        "event": "system.ready",
+    })
+
     yield
 
-    logger.info("Shutting down Isengard API")
+    logger.info("Isengard API shutting down", extra={
+        "event": "system.shutdown",
+    })
 
 
 def create_app() -> FastAPI:
@@ -71,6 +81,7 @@ def create_app() -> FastAPI:
     app.include_router(characters.router, prefix="/api/characters", tags=["Characters"])
     app.include_router(training.router, prefix="/api/training", tags=["Training"])
     app.include_router(generation.router, prefix="/api/generation", tags=["Generation"])
+    app.include_router(logs.router, prefix="/api/client-logs", tags=["Client Logs"])
 
     return app
 
