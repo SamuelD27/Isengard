@@ -95,6 +95,15 @@ EXPOSE 8188
 RUN uv pip install --system ostris-ai-toolkit
 
 # ============================================================
+# Node.js for Web Frontend
+# ============================================================
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 3000
+
+# ============================================================
 # Isengard Application
 # ============================================================
 WORKDIR /app
@@ -128,6 +137,15 @@ COPY apps/worker/src/ /app/apps/worker/src/
 
 # Copy workflow templates
 COPY packages/plugins/image/workflows/ /app/packages/plugins/image/workflows/
+
+# Build web frontend
+COPY apps/web/package.json /app/apps/web/package.json
+WORKDIR /app/apps/web
+RUN npm install
+COPY apps/web/ /app/apps/web/
+RUN npm run build
+
+WORKDIR /app
 
 # Copy startup script
 COPY deploy/runpod/start.sh /start.sh

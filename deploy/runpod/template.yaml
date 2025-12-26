@@ -43,6 +43,9 @@ ports:
   - port: 22
     protocol: tcp
     name: ssh
+  - port: 3000
+    protocol: http
+    name: web-gui
   - port: 8000
     protocol: http
     name: api

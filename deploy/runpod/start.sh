@@ -318,7 +318,37 @@ else
 fi
 
 # ============================================================
-# 7. START ISENGARD WORKER
+# 7. START WEB FRONTEND
+# ============================================================
+header "Starting Web Frontend"
+
+WEB_DIR="/app/apps/web"
+
+if [ -d "${WEB_DIR}/dist" ]; then
+    if ! pgrep -f "serve.*3000" > /dev/null; then
+        log "Starting web frontend..."
+
+        # Install serve if not present
+        npm install -g serve 2>/dev/null || true
+
+        # Serve the built frontend
+        nohup serve -s "${WEB_DIR}/dist" -l 3000 > "${LOG_DIR}/web.log" 2>&1 &
+
+        sleep 2
+        if curl -s http://localhost:3000 > /dev/null 2>&1; then
+            log "Web frontend started on port 3000"
+        else
+            warn "Web frontend may not have started. Check ${LOG_DIR}/web.log"
+        fi
+    else
+        log "Web frontend already running"
+    fi
+else
+    warn "Web frontend not built. Run 'npm run build' in ${WEB_DIR}"
+fi
+
+# ============================================================
+# 8. START ISENGARD WORKER
 # ============================================================
 header "Starting Isengard Worker"
 
@@ -343,7 +373,7 @@ else
 fi
 
 # ============================================================
-# 8. FINAL STATUS
+# 9. FINAL STATUS
 # ============================================================
 header "Startup Complete"
 
@@ -353,6 +383,7 @@ echo "  - SSH:     $(pgrep -x sshd > /dev/null && echo '✓ Running on port 22' 
 echo "  - Redis:   $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✓ Running on port 6379' || echo '✗ Not running')"
 echo "  - ComfyUI: $(curl -s http://localhost:8188/system_stats > /dev/null 2>&1 && echo '✓ Running on port 8188' || echo '✗ Not running')"
 echo "  - API:     $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✓ Running on port 8000' || echo '✗ Not running')"
+echo "  - Web GUI: $(curl -s http://localhost:3000 > /dev/null 2>&1 && echo '✓ Running on port 3000' || echo '✗ Not running')"
 echo "  - Worker:  $(pgrep -f 'apps.worker.src.main' > /dev/null && echo '✓ Running' || echo '✗ Not running')"
 echo ""
 log "Models:"
@@ -360,6 +391,7 @@ echo "  - FLUX.1-dev:     $([ -f '${COMFYUI_MODELS}/checkpoints/flux1-dev.safete
 echo "  - FLUX.1-schnell: $([ -f '${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors' ] && echo '✓ Downloaded' || echo '✗ Missing')"
 echo ""
 log "Access:"
+echo "  - Web GUI: http://\$(hostname -I | awk '{print \$1}'):3000"
 echo "  - API:     http://\$(hostname -I | awk '{print \$1}'):8000"
 echo "  - ComfyUI: http://\$(hostname -I | awk '{print \$1}'):8188"
 echo "  - SSH:     ssh root@\$(hostname -I | awk '{print \$1}')"
