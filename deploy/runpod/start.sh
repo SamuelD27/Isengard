@@ -3,19 +3,43 @@
 #
 # This script runs on pod startup to:
 # 1. Configure SSH access
-# 2. Download required models
+# 2. Download required models (R2 first, fallback to HuggingFace)
 # 3. Start all services (Redis, API, Worker, ComfyUI)
-#
-# Environment variables (set in RunPod template):
-#   HF_TOKEN          - HuggingFace token for model downloads
-#   VOLUME_ROOT       - Data storage path (default: /runpod-volume/isengard)
-#   REDIS_URL         - Redis connection (default: redis://localhost:6379)
-#   COMFYUI_URL       - ComfyUI endpoint (default: http://localhost:8188)
-#   WORKER_NAME       - Worker identifier (default: runpod-worker-1)
 
 set -e
 
-# Colors for output
+# ============================================================
+# LOAD SECRETS (from bundled secrets file)
+# ============================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/secrets.sh" ]; then
+    source "${SCRIPT_DIR}/secrets.sh"
+elif [ -f "/secrets.sh" ]; then
+    source "/secrets.sh"
+fi
+
+# Fallback defaults (will be empty if secrets not loaded)
+export HF_TOKEN="${HF_TOKEN:-}"
+R2_ACCESS_KEY="${R2_ACCESS_KEY:-}"
+R2_SECRET_KEY="${R2_SECRET_KEY:-}"
+R2_ENDPOINT="${R2_ENDPOINT:-https://e6b3925ef3896465b73c442be466db90.r2.cloudflarestorage.com}"
+R2_BUCKET="${R2_BUCKET:-isengard-models}"
+
+# ============================================================
+# Configuration
+# ============================================================
+export VOLUME_ROOT="${VOLUME_ROOT:-/runpod-volume/isengard}"
+export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+export COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
+export WORKER_NAME="${WORKER_NAME:-runpod-worker-1}"
+export LOG_DIR="${VOLUME_ROOT}/logs"
+export ISENGARD_MODE="${ISENGARD_MODE:-production}"
+
+MODELS_DIR="${VOLUME_ROOT}/models"
+COMFYUI_MODELS="${VOLUME_ROOT}/comfyui/models"
+HF_CACHE="${VOLUME_ROOT}/cache/huggingface"
+
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -27,34 +51,15 @@ warn() { echo -e "${YELLOW}[$(date +'%H:%M:%S')] WARNING:${NC} $1"; }
 error() { echo -e "${RED}[$(date +'%H:%M:%S')] ERROR:${NC} $1"; }
 header() { echo -e "\n${BLUE}=== $1 ===${NC}\n"; }
 
-# Default configuration
-export VOLUME_ROOT="${VOLUME_ROOT:-/runpod-volume/isengard}"
-export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
-export COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
-export WORKER_NAME="${WORKER_NAME:-runpod-worker-1}"
-export LOG_DIR="${VOLUME_ROOT}/logs"
-export ISENGARD_MODE="${ISENGARD_MODE:-production}"
-
-# Directories
-MODELS_DIR="${VOLUME_ROOT}/models"
-COMFYUI_MODELS="${VOLUME_ROOT}/comfyui/models"
-HF_CACHE="${VOLUME_ROOT}/cache/huggingface"
-
 # ============================================================
 # 1. SSH CONFIGURATION
 # ============================================================
 header "Configuring SSH"
 
-# Start SSH daemon if not running
 if ! pgrep -x "sshd" > /dev/null; then
     log "Starting SSH daemon..."
+    [ ! -f /etc/ssh/ssh_host_rsa_key ] && ssh-keygen -A
 
-    # Generate host keys if they don't exist
-    if [ ! -f /etc/ssh/ssh_host_rsa_key ]; then
-        ssh-keygen -A
-    fi
-
-    # Configure SSH
     cat > /etc/ssh/sshd_config << 'SSHCONFIG'
 Port 22
 PermitRootLogin yes
@@ -67,22 +72,17 @@ AcceptEnv LANG LC_*
 Subsystem sftp /usr/lib/openssh/sftp-server
 SSHCONFIG
 
-    # Set root password if PUBLIC_KEY not provided
     if [ -z "$PUBLIC_KEY" ]; then
-        # Generate random password and display it
         ROOT_PASSWORD=$(openssl rand -base64 12)
         echo "root:${ROOT_PASSWORD}" | chpasswd
         log "SSH root password: ${ROOT_PASSWORD}"
-        log "Save this password! It won't be shown again."
     else
-        # Add public key for key-based auth
         mkdir -p /root/.ssh
         echo "$PUBLIC_KEY" > /root/.ssh/authorized_keys
         chmod 600 /root/.ssh/authorized_keys
         log "SSH public key configured"
     fi
 
-    # Start SSH
     /usr/sbin/sshd
     log "SSH daemon started on port 22"
 else
@@ -111,127 +111,156 @@ mkdir -p "${VOLUME_ROOT}/loras"
 log "Directories created at ${VOLUME_ROOT}"
 
 # ============================================================
-# 3. DOWNLOAD MODELS
+# 3. SETUP RCLONE FOR R2
+# ============================================================
+header "Configuring rclone"
+
+mkdir -p ~/.config/rclone
+cat > ~/.config/rclone/rclone.conf << EOF
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = ${R2_ACCESS_KEY}
+secret_access_key = ${R2_SECRET_KEY}
+region = auto
+endpoint = ${R2_ENDPOINT}
+EOF
+
+log "rclone configured for R2"
+
+# ============================================================
+# 4. DOWNLOAD MODELS (R2 first, fallback to HuggingFace)
 # ============================================================
 header "Downloading Models"
 
-# Check for HF token
-if [ -z "$HF_TOKEN" ]; then
-    error "HF_TOKEN not set! Cannot download gated models."
-    error "Set HF_TOKEN in RunPod template environment variables."
-else
-    log "HF_TOKEN is set"
-    export HF_HOME="${HF_CACHE}"
-    export TRANSFORMERS_CACHE="${HF_CACHE}"
+export HF_HOME="${HF_CACHE}"
+export TRANSFORMERS_CACHE="${HF_CACHE}"
 
-    # Install huggingface_hub if not present
-    pip install -q huggingface_hub
+# Install aria2 for fast multi-connection downloads
+apt-get update -qq && apt-get install -y -qq aria2 > /dev/null 2>&1 || true
+
+# Function: Download from R2 with rclone (ultra fast)
+download_from_r2() {
+    local src="$1"
+    local dst="$2"
+    log "Downloading from R2: $src"
+    rclone copy "r2:${R2_BUCKET}/${src}" "${dst}" \
+        --transfers 16 \
+        --checkers 8 \
+        --multi-thread-streams 8 \
+        --buffer-size 64M \
+        --progress \
+        --stats-one-line \
+        2>&1 | tail -1
+}
+
+# Function: Download from HuggingFace with aria2 (fast parallel)
+download_from_hf() {
+    local repo="$1"
+    local file="$2"
+    local dst="$3"
+
+    log "Downloading from HuggingFace: $repo/$file"
+
+    # Get download URL
+    local url="https://huggingface.co/${repo}/resolve/main/${file}"
+
+    # Use aria2c for multi-connection download
+    aria2c -x 16 -s 16 -k 1M \
+        --header="Authorization: Bearer ${HF_TOKEN}" \
+        -d "${dst}" \
+        -o "${file}" \
+        "${url}" \
+        --console-log-level=warn \
+        --summary-interval=10 \
+        2>&1 || {
+            # Fallback to wget if aria2c fails
+            warn "aria2c failed, using wget..."
+            wget -q --show-progress \
+                --header="Authorization: Bearer ${HF_TOKEN}" \
+                -O "${dst}/${file}" \
+                "${url}"
+        }
+}
+
+# Function: Sync models to R2 (run once after HF download)
+sync_to_r2() {
+    log "Syncing models to R2 for future fast downloads..."
+    rclone sync "${COMFYUI_MODELS}" "r2:${R2_BUCKET}/comfyui/models" \
+        --transfers 8 \
+        --progress \
+        --stats-one-line \
+        2>&1 | tail -5
+    log "Models synced to R2"
+}
+
+# Check if models exist on R2
+log "Checking R2 for cached models..."
+R2_HAS_MODELS=$(rclone ls "r2:${R2_BUCKET}/comfyui/models/checkpoints/" 2>/dev/null | grep -c "flux1-dev" || echo "0")
+
+if [ "$R2_HAS_MODELS" -gt 0 ]; then
+    log "Models found on R2, downloading via rclone (ultra fast)..."
+
+    download_from_r2 "comfyui/models/checkpoints" "${COMFYUI_MODELS}/checkpoints"
+    download_from_r2 "comfyui/models/vae" "${COMFYUI_MODELS}/vae"
+    download_from_r2 "comfyui/models/clip" "${COMFYUI_MODELS}/clip"
+
+    log "All models downloaded from R2"
+else
+    log "Models not on R2, downloading from HuggingFace..."
 
     # Login to HuggingFace
-    log "Logging into HuggingFace..."
+    pip install -q huggingface_hub
     python3 -c "from huggingface_hub import login; login(token='${HF_TOKEN}')"
 
-    # Download FLUX.1-dev (main model for LoRA training)
-    FLUX_MODEL="black-forest-labs/FLUX.1-dev"
-    FLUX_LOCAL="${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors"
-
-    if [ ! -f "$FLUX_LOCAL" ]; then
-        log "Downloading FLUX.1-dev model..."
-        python3 << PYEOF
-from huggingface_hub import hf_hub_download
-import shutil
-
-# Download the model
-path = hf_hub_download(
-    repo_id="black-forest-labs/FLUX.1-dev",
-    filename="flux1-dev.safetensors",
-    local_dir="${COMFYUI_MODELS}/checkpoints",
-    local_dir_use_symlinks=False
-)
-print(f"Downloaded to: {path}")
-PYEOF
-        log "FLUX.1-dev downloaded"
+    # FLUX.1-dev
+    FLUX_DEV="${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors"
+    if [ ! -f "$FLUX_DEV" ]; then
+        download_from_hf "black-forest-labs/FLUX.1-dev" "flux1-dev.safetensors" "${COMFYUI_MODELS}/checkpoints"
     else
         log "FLUX.1-dev already exists"
     fi
 
-    # Download FLUX.1-schnell (fast inference)
-    SCHNELL_LOCAL="${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors"
-
-    if [ ! -f "$SCHNELL_LOCAL" ]; then
-        log "Downloading FLUX.1-schnell model..."
-        python3 << PYEOF
-from huggingface_hub import hf_hub_download
-
-path = hf_hub_download(
-    repo_id="black-forest-labs/FLUX.1-schnell",
-    filename="flux1-schnell.safetensors",
-    local_dir="${COMFYUI_MODELS}/checkpoints",
-    local_dir_use_symlinks=False
-)
-print(f"Downloaded to: {path}")
-PYEOF
-        log "FLUX.1-schnell downloaded"
+    # FLUX.1-schnell
+    FLUX_SCHNELL="${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors"
+    if [ ! -f "$FLUX_SCHNELL" ]; then
+        download_from_hf "black-forest-labs/FLUX.1-schnell" "flux1-schnell.safetensors" "${COMFYUI_MODELS}/checkpoints"
     else
         log "FLUX.1-schnell already exists"
     fi
 
-    # Download VAE
-    VAE_LOCAL="${COMFYUI_MODELS}/vae/ae.safetensors"
-
-    if [ ! -f "$VAE_LOCAL" ]; then
-        log "Downloading FLUX VAE..."
-        python3 << PYEOF
-from huggingface_hub import hf_hub_download
-
-path = hf_hub_download(
-    repo_id="black-forest-labs/FLUX.1-dev",
-    filename="ae.safetensors",
-    local_dir="${COMFYUI_MODELS}/vae",
-    local_dir_use_symlinks=False
-)
-print(f"Downloaded to: {path}")
-PYEOF
-        log "FLUX VAE downloaded"
+    # VAE
+    VAE="${COMFYUI_MODELS}/vae/ae.safetensors"
+    if [ ! -f "$VAE" ]; then
+        download_from_hf "black-forest-labs/FLUX.1-dev" "ae.safetensors" "${COMFYUI_MODELS}/vae"
     else
-        log "FLUX VAE already exists"
+        log "VAE already exists"
     fi
 
-    # Download CLIP models
-    log "Downloading CLIP models..."
-    python3 << PYEOF
-from huggingface_hub import hf_hub_download
-import os
+    # CLIP-L
+    CLIP_L="${COMFYUI_MODELS}/clip/clip_l.safetensors"
+    if [ ! -f "$CLIP_L" ]; then
+        download_from_hf "comfyanonymous/flux_text_encoders" "clip_l.safetensors" "${COMFYUI_MODELS}/clip"
+    else
+        log "CLIP-L already exists"
+    fi
 
-clip_dir = "${COMFYUI_MODELS}/clip"
+    # T5-XXL
+    T5="${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors"
+    if [ ! -f "$T5" ]; then
+        download_from_hf "comfyanonymous/flux_text_encoders" "t5xxl_fp16.safetensors" "${COMFYUI_MODELS}/clip"
+    else
+        log "T5-XXL already exists"
+    fi
 
-# CLIP-L
-clip_l = os.path.join(clip_dir, "clip_l.safetensors")
-if not os.path.exists(clip_l):
-    hf_hub_download(
-        repo_id="comfyanonymous/flux_text_encoders",
-        filename="clip_l.safetensors",
-        local_dir=clip_dir,
-        local_dir_use_symlinks=False
-    )
-    print("Downloaded CLIP-L")
+    log "All models downloaded from HuggingFace"
 
-# T5-XXL
-t5_xxl = os.path.join(clip_dir, "t5xxl_fp16.safetensors")
-if not os.path.exists(t5_xxl):
-    hf_hub_download(
-        repo_id="comfyanonymous/flux_text_encoders",
-        filename="t5xxl_fp16.safetensors",
-        local_dir=clip_dir,
-        local_dir_use_symlinks=False
-    )
-    print("Downloaded T5-XXL")
-PYEOF
-    log "CLIP models downloaded"
+    # Sync to R2 for next time (run in background)
+    sync_to_r2 &
 fi
 
 # ============================================================
-# 4. START REDIS
+# 5. START REDIS
 # ============================================================
 header "Starting Redis"
 
@@ -239,18 +268,13 @@ if ! pgrep -x "redis-server" > /dev/null; then
     log "Starting Redis server..."
     redis-server --daemonize yes --port 6379
     sleep 2
-
-    if redis-cli ping > /dev/null 2>&1; then
-        log "Redis started successfully"
-    else
-        error "Failed to start Redis"
-    fi
+    redis-cli ping > /dev/null 2>&1 && log "Redis started" || error "Redis failed"
 else
     log "Redis already running"
 fi
 
 # ============================================================
-# 5. START COMFYUI
+# 6. START COMFYUI
 # ============================================================
 header "Starting ComfyUI"
 
@@ -260,34 +284,29 @@ if [ -d "$COMFYUI_DIR" ]; then
     if ! pgrep -f "main.py.*ComfyUI" > /dev/null; then
         log "Starting ComfyUI..."
 
-        # Link models to ComfyUI
+        # Link models
         ln -sf "${COMFYUI_MODELS}/checkpoints"/* "${COMFYUI_DIR}/models/checkpoints/" 2>/dev/null || true
         ln -sf "${COMFYUI_MODELS}/loras"/* "${COMFYUI_DIR}/models/loras/" 2>/dev/null || true
         ln -sf "${COMFYUI_MODELS}/vae"/* "${COMFYUI_DIR}/models/vae/" 2>/dev/null || true
         ln -sf "${COMFYUI_MODELS}/clip"/* "${COMFYUI_DIR}/models/clip/" 2>/dev/null || true
 
-        # Start ComfyUI in background
         cd "$COMFYUI_DIR"
         nohup python main.py --listen 0.0.0.0 --port 8188 > "${LOG_DIR}/comfyui.log" 2>&1 &
 
-        # Wait for startup
-        log "Waiting for ComfyUI to start..."
+        log "Waiting for ComfyUI..."
         for i in {1..30}; do
-            if curl -s http://localhost:8188/system_stats > /dev/null 2>&1; then
-                log "ComfyUI started successfully"
-                break
-            fi
+            curl -s http://localhost:8188/system_stats > /dev/null 2>&1 && { log "ComfyUI started"; break; }
             sleep 2
         done
     else
         log "ComfyUI already running"
     fi
 else
-    warn "ComfyUI not installed at ${COMFYUI_DIR}"
+    warn "ComfyUI not installed"
 fi
 
 # ============================================================
-# 6. START ISENGARD API
+# 7. START ISENGARD API
 # ============================================================
 header "Starting Isengard API"
 
@@ -304,13 +323,9 @@ if ! pgrep -f "uvicorn.*apps.api" > /dev/null; then
         --port 8000 \
         > "${LOG_DIR}/api/startup.log" 2>&1 &
 
-    # Wait for API
-    log "Waiting for API to start..."
+    log "Waiting for API..."
     for i in {1..30}; do
-        if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-            log "API started successfully"
-            break
-        fi
+        curl -s http://localhost:8000/health > /dev/null 2>&1 && { log "API started"; break; }
         sleep 1
     done
 else
@@ -318,7 +333,7 @@ else
 fi
 
 # ============================================================
-# 7. START WEB FRONTEND
+# 8. START WEB FRONTEND
 # ============================================================
 header "Starting Web Frontend"
 
@@ -327,28 +342,19 @@ WEB_DIR="/app/apps/web"
 if [ -d "${WEB_DIR}/dist" ]; then
     if ! pgrep -f "serve.*3000" > /dev/null; then
         log "Starting web frontend..."
-
-        # Install serve if not present
         npm install -g serve 2>/dev/null || true
-
-        # Serve the built frontend
         nohup serve -s "${WEB_DIR}/dist" -l 3000 > "${LOG_DIR}/web.log" 2>&1 &
-
         sleep 2
-        if curl -s http://localhost:3000 > /dev/null 2>&1; then
-            log "Web frontend started on port 3000"
-        else
-            warn "Web frontend may not have started. Check ${LOG_DIR}/web.log"
-        fi
+        curl -s http://localhost:3000 > /dev/null 2>&1 && log "Web started on port 3000" || warn "Web may not be running"
     else
-        log "Web frontend already running"
+        log "Web already running"
     fi
 else
-    warn "Web frontend not built. Run 'npm run build' in ${WEB_DIR}"
+    warn "Web not built"
 fi
 
 # ============================================================
-# 8. START ISENGARD WORKER
+# 9. START ISENGARD WORKER
 # ============================================================
 header "Starting Isengard Worker"
 
@@ -358,47 +364,34 @@ if ! pgrep -f "apps.worker.src.main" > /dev/null; then
     export PYTHONPATH=/app
     export USE_REDIS=true
 
-    nohup python -m apps.worker.src.main \
-        > "${LOG_DIR}/worker/startup.log" 2>&1 &
-
+    nohup python -m apps.worker.src.main > "${LOG_DIR}/worker/startup.log" 2>&1 &
     sleep 3
-
-    if pgrep -f "apps.worker.src.main" > /dev/null; then
-        log "Worker started successfully"
-    else
-        error "Worker failed to start. Check ${LOG_DIR}/worker/startup.log"
-    fi
+    pgrep -f "apps.worker.src.main" > /dev/null && log "Worker started" || error "Worker failed"
 else
     log "Worker already running"
 fi
 
 # ============================================================
-# 9. FINAL STATUS
+# 10. FINAL STATUS
 # ============================================================
 header "Startup Complete"
 
 echo ""
-log "Services Status:"
-echo "  - SSH:     $(pgrep -x sshd > /dev/null && echo '✓ Running on port 22' || echo '✗ Not running')"
-echo "  - Redis:   $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✓ Running on port 6379' || echo '✗ Not running')"
-echo "  - ComfyUI: $(curl -s http://localhost:8188/system_stats > /dev/null 2>&1 && echo '✓ Running on port 8188' || echo '✗ Not running')"
-echo "  - API:     $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✓ Running on port 8000' || echo '✗ Not running')"
-echo "  - Web GUI: $(curl -s http://localhost:3000 > /dev/null 2>&1 && echo '✓ Running on port 3000' || echo '✗ Not running')"
-echo "  - Worker:  $(pgrep -f 'apps.worker.src.main' > /dev/null && echo '✓ Running' || echo '✗ Not running')"
+log "Services:"
+echo "  SSH:     $(pgrep -x sshd > /dev/null && echo '✓ port 22' || echo '✗')"
+echo "  Redis:   $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✓ port 6379' || echo '✗')"
+echo "  ComfyUI: $(curl -s http://localhost:8188/system_stats > /dev/null 2>&1 && echo '✓ port 8188' || echo '✗')"
+echo "  API:     $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✓ port 8000' || echo '✗')"
+echo "  Web:     $(curl -s http://localhost:3000 > /dev/null 2>&1 && echo '✓ port 3000' || echo '✗')"
+echo "  Worker:  $(pgrep -f 'apps.worker.src.main' > /dev/null && echo '✓' || echo '✗')"
 echo ""
 log "Models:"
-echo "  - FLUX.1-dev:     $([ -f '${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors' ] && echo '✓ Downloaded' || echo '✗ Missing')"
-echo "  - FLUX.1-schnell: $([ -f '${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors' ] && echo '✓ Downloaded' || echo '✗ Missing')"
-echo ""
-log "Access:"
-echo "  - Web GUI: http://\$(hostname -I | awk '{print \$1}'):3000"
-echo "  - API:     http://\$(hostname -I | awk '{print \$1}'):8000"
-echo "  - ComfyUI: http://\$(hostname -I | awk '{print \$1}'):8188"
-echo "  - SSH:     ssh root@\$(hostname -I | awk '{print \$1}')"
-echo ""
-log "Logs: ${LOG_DIR}/"
+echo "  FLUX.1-dev:     $([ -f '${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors' ] && echo '✓' || echo '✗')"
+echo "  FLUX.1-schnell: $([ -f '${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors' ] && echo '✓' || echo '✗')"
+echo "  VAE:            $([ -f '${COMFYUI_MODELS}/vae/ae.safetensors' ] && echo '✓' || echo '✗')"
+echo "  CLIP-L:         $([ -f '${COMFYUI_MODELS}/clip/clip_l.safetensors' ] && echo '✓' || echo '✗')"
+echo "  T5-XXL:         $([ -f '${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors' ] && echo '✓' || echo '✗')"
 echo ""
 
 # Keep container running
-log "Startup complete. Container will keep running..."
 tail -f /dev/null

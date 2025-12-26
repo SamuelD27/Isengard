@@ -13,8 +13,9 @@
 #   docker build -t isengard:latest .
 #
 # Run locally (for testing):
-#   docker run --gpus all -p 22:22 -p 3000:3000 -p 8000:8000 -p 8188:8188 \
-#     -e HF_TOKEN=xxx isengard:latest
+#   docker run --gpus all -p 22:22 -p 3000:3000 -p 8000:8000 -p 8188:8188 isengard:latest
+#
+# Note: HF_TOKEN and R2 credentials are hardcoded in start.sh
 
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
@@ -45,6 +46,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     # Redis
     redis-server \
+    # Fast downloads
+    aria2 \
+    unzip \
     # Utilities
     htop \
     nvtop \
@@ -52,6 +56,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim \
     jq \
     && rm -rf /var/lib/apt/lists/*
+
+# Install rclone for ultra-fast R2 downloads
+RUN curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip \
+    && unzip rclone-current-linux-amd64.zip \
+    && cp rclone-*-linux-amd64/rclone /usr/local/bin/ \
+    && chmod +x /usr/local/bin/rclone \
+    && rm -rf rclone-*
 
 # Make python3.11 default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -153,9 +164,10 @@ RUN npm run build
 
 WORKDIR /app
 
-# Copy startup script
+# Copy startup script and secrets
 COPY deploy/runpod/start.sh /start.sh
-RUN chmod +x /start.sh
+COPY deploy/runpod/secrets.sh /secrets.sh
+RUN chmod +x /start.sh /secrets.sh
 
 # ============================================================
 # Environment

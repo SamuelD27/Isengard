@@ -26,6 +26,7 @@ logs/**/*.json
 *.pem
 *.key
 secrets/
+deploy/runpod/secrets.sh
 
 # ============================================
 # Python
