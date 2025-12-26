@@ -269,6 +269,100 @@ The logging module MUST redact these patterns before writing:
 | `token=[^&\s]+` | `token=***` | URL tokens |
 | `password=.*` | `password=***` | Passwords |
 
+### 🔒 Logging-First Troubleshooting Doctrine (Non-Negotiable)
+
+This doctrine is **MANDATORY** for all development and debugging activities in Isengard.
+
+#### Core Principles
+
+1. **All services MUST emit structured JSON logs for every action**
+   - Not just errors — INFO-level and above for every meaningful operation
+   - Every request, job start/stop, state transition, and external call must be logged
+   - Silence is failure; if something happens and there's no log, the code is incomplete
+
+2. **Logs are the PRIMARY source of truth for system behavior**
+   - The question "what happened?" is answered by logs, not by reading code
+   - If logs contradict code, investigate the discrepancy — don't assume code is correct
+   - Debug sessions start with logs, not breakpoints
+
+3. **Claude Code MUST inspect, organize, and summarize logs BEFORE reasoning about any bug**
+   - Step 1: Locate the relevant log files
+   - Step 2: Organize by correlation ID and timestamp
+   - Step 3: Read end-to-end, noting anomalies
+   - Step 4: Summarize findings in writing
+   - Step 5: ONLY THEN propose hypotheses
+
+4. **Claude Code MUST automatically rotate logs per service per day and archive previous runs**
+   - Log directory structure: `logs/{service}/latest/` and `logs/{service}/archive/YYYYMMDD_HHMMSS/`
+   - On each run, move `latest/` to `archive/{timestamp}/` before writing new logs
+   - Each session boundary is clearly marked
+
+5. **Claude Code is NOT allowed to propose solutions without citing evidence from logs**
+   - Every bug fix proposal must reference specific log entries
+   - "I suspect X" without log evidence is not acceptable
+   - If logs don't show the problem, add logging first
+
+6. **If logs are insufficient, improving logging is the first fix**
+   - Missing logs > Missing features in priority
+   - A feature without observability is not complete
+   - "Add logging" is never tech debt — it's the primary deliverable
+
+#### Log Directory Structure (Target State)
+
+```
+logs/
+├── api/
+│   ├── latest/
+│   │   └── api.log
+│   └── archive/
+│       ├── 20250125_143022/
+│       │   └── api.log
+│       └── 20250125_102015/
+│           └── api.log
+├── worker/
+│   ├── latest/
+│   │   ├── worker.log
+│   │   └── subprocess/
+│   │       ├── train-abc123.stdout.log
+│   │       └── train-abc123.stderr.log
+│   └── archive/
+│       └── .../
+└── web/
+    ├── latest/
+    │   └── client.log
+    └── archive/
+        └── .../
+```
+
+#### Required Log Schema
+
+Every log entry MUST contain:
+
+```json
+{
+  "timestamp": "2025-01-25T14:30:00.000Z",
+  "level": "INFO|WARN|ERROR|DEBUG",
+  "service": "api|worker|web",
+  "correlation_id": "req-abc123",
+  "message": "Human-readable description",
+  "event": "request.start|job.progress|error.unhandled",
+  "context": { }
+}
+```
+
+#### Verification Commands
+
+```bash
+# Check log structure
+scripts/validate_logs.py
+
+# Run observability smoke test
+scripts/obs_smoke_test.py
+
+# Tail structured logs with formatting
+tail -f logs/api/latest/api.log | jq .
+```
+
 ---
 
 ## Development Workflow
