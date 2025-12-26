@@ -1,14 +1,20 @@
-# Isengard RunPod Dockerfile
+# Isengard Dockerfile
 #
 # Full GPU image with SSH, ComfyUI, and all dependencies.
 # For deployment on RunPod serverless or pods.
 #
+# Ports:
+#   22   - SSH
+#   3000 - Web GUI
+#   8000 - API
+#   8188 - ComfyUI
+#
 # Build:
-#   docker build -t ghcr.io/samueld27/isengard-runpod:latest -f deploy/runpod/Dockerfile .
+#   docker build -t isengard:latest .
 #
 # Run locally (for testing):
-#   docker run --gpus all -p 22:22 -p 8000:8000 -p 8188:8188 \
-#     -e HF_TOKEN=xxx ghcr.io/samueld27/isengard-runpod:latest
+#   docker run --gpus all -p 22:22 -p 3000:3000 -p 8000:8000 -p 8188:8188 \
+#     -e HF_TOKEN=xxx isengard:latest
 
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
 
