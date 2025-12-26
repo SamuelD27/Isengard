@@ -9,11 +9,12 @@
 # Environment:
 #   ISENGARD_MODE=fast-test        # Default: mock plugins, no GPU
 #   ISENGARD_MODE=production       # Full training/generation (requires GPU)
+#   VOLUME_ROOT=./data             # Override data storage location
 
 version: '3.8'
 
 services:
-  # Redis for job queue
+  # Redis for job queue (M2: required for queue, M1: optional for health checks only)
   redis:
     image: redis:7-alpine
     ports:
@@ -36,11 +37,11 @@ services:
     environment:
       - ISENGARD_MODE=${ISENGARD_MODE:-fast-test}
       - REDIS_URL=redis://redis:6379
-      - DATA_DIR=/data
+      - VOLUME_ROOT=/data
       - LOG_DIR=/logs
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/data
+      - ${VOLUME_ROOT:-./data}:/data
       - ./logs:/logs
       - ./packages:/app/packages:ro
       - ./apps/api/src:/app/apps/api/src:ro
@@ -55,7 +56,7 @@ services:
     # For development: enable hot reload
     command: uvicorn apps.api.src.main:app --host 0.0.0.0 --port 8000 --reload
 
-  # Background worker
+  # Background worker (M1: jobs run in API process, worker is optional)
   worker:
     build:
       context: .
@@ -63,11 +64,11 @@ services:
     environment:
       - ISENGARD_MODE=${ISENGARD_MODE:-fast-test}
       - REDIS_URL=redis://redis:6379
-      - DATA_DIR=/data
+      - VOLUME_ROOT=/data
       - LOG_DIR=/logs
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./data:/data
+      - ${VOLUME_ROOT:-./data}:/data
       - ./logs:/logs
       - ./packages:/app/packages:ro
       - ./apps/worker/src:/app/apps/worker/src:ro
