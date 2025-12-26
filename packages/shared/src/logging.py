@@ -71,7 +71,7 @@ def with_correlation_id(func: Callable) -> Callable:
 # Redaction patterns - compile once for performance
 REDACTION_PATTERNS = [
     (re.compile(r"hf_[A-Za-z0-9]+"), "hf_***REDACTED***"),
-    (re.compile(r"sk-[A-Za-z0-9]+"), "sk-***REDACTED***"),
+    (re.compile(r"sk-[A-Za-z0-9-]+"), "sk-***REDACTED***"),  # Include hyphens for sk-proj-...
     (re.compile(r"ghp_[A-Za-z0-9]+"), "ghp_***REDACTED***"),
     (re.compile(r"rpa_[A-Za-z0-9]+"), "rpa_***REDACTED***"),
     (re.compile(r"/Users/[^/]+/"), "/[HOME]/"),
