@@ -36,6 +36,7 @@ def test_volume_root(tmp_path_factory):
     """Create a temporary volume root for tests."""
     tmp = tmp_path_factory.mktemp("isengard_test")
     os.environ["VOLUME_ROOT"] = str(tmp)
+    os.environ["ISENGARD_MODE"] = "fast_test"  # Enable test mode (relaxed validation)
     return tmp
 
 

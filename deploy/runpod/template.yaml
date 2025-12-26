@@ -1,0 +1,113 @@
+# Isengard RunPod Pod Template
+#
+# Deploy a GPU worker on RunPod for training and generation.
+#
+# Prerequisites:
+# - RunPod account with API key
+# - HuggingFace account with access to FLUX.1-dev
+# - Network volume created on RunPod (recommended: 100GB+)
+#
+# Usage:
+#   1. Create a network volume on RunPod
+#   2. Replace placeholders below
+#   3. Deploy via RunPod API or CLI
+
+apiVersion: v1
+kind: Template
+metadata:
+  name: isengard-worker
+  description: GPU worker for LoRA training and image generation
+
+spec:
+  # Container configuration
+  container:
+    image: ghcr.io/samueld27/isengard-worker-gpu:latest
+    # Alternative: build and push your own
+    # image: your-registry/isengard-worker-gpu:latest
+
+  # GPU requirements
+  gpu:
+    # Options: RTX_4090, A100_80GB, A100_40GB, A6000
+    # Training requires 24GB+ VRAM
+    type: RTX_4090
+    count: 1
+
+  # Network volume for persistent storage
+  volume:
+    # Create at: https://www.runpod.io/console/user/storage
+    id: ${RUNPOD_VOLUME_ID}
+    mountPath: /runpod-volume
+
+  # Environment variables
+  env:
+    # Required
+    - name: ISENGARD_MODE
+      value: production
+
+    - name: VOLUME_ROOT
+      value: /runpod-volume/isengard
+
+    - name: LOG_DIR
+      value: /runpod-volume/isengard/logs
+
+    - name: LOG_LEVEL
+      value: INFO
+
+    - name: HF_TOKEN
+      value: ${HF_TOKEN}
+
+    # Redis (external service)
+    - name: REDIS_URL
+      value: ${REDIS_URL}
+
+    # ComfyUI (if running on same pod)
+    - name: COMFYUI_URL
+      value: http://localhost:8188
+
+    # Worker identification
+    - name: WORKER_NAME
+      value: runpod-worker-1
+
+  # Resource limits
+  resources:
+    cpu: 8
+    memory: 32Gi
+
+  # Health checks
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 10
+
+  # Ports to expose
+  ports:
+    - containerPort: 8000
+      name: api
+    - containerPort: 8188
+      name: comfyui
+
+---
+# Deployment notes:
+#
+# Option 1: Single pod with both worker and ComfyUI
+#   - Deploy this template
+#   - ComfyUI runs as sidecar (bundled in image)
+#   - Good for development/testing
+#
+# Option 2: Separate pods (recommended for production)
+#   - Deploy worker pod with this template
+#   - Deploy separate ComfyUI pod
+#   - Connect via internal network
+#   - Update COMFYUI_URL accordingly
+#
+# Initial setup after deployment:
+#   1. SSH into pod
+#   2. Run model download: python scripts/download_models.py
+#   3. Test with: curl localhost:8000/health
+#
+# Monitoring:
+#   - Logs: /runpod-volume/isengard/logs/worker/
+#   - GPU: nvidia-smi
+#   - Jobs: redis-cli -u $REDIS_URL XINFO STREAM isengard:training

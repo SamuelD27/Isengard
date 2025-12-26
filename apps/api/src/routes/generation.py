@@ -11,7 +11,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator
 
@@ -26,6 +26,7 @@ from packages.shared.src.types import (
 )
 from packages.shared.src.capabilities import is_capability_supported
 from packages.shared.src import redis_client
+from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_GENERATION
 
 from ..services.job_executor import (
     execute_generation_job,
@@ -79,7 +80,9 @@ async def _list_jobs(limit: int = 20) -> list[GenerationJob]:
 
 
 @router.post("", response_model=GenerationJob, status_code=201)
+@rate_limit(**RATE_LIMIT_GENERATION)
 async def generate_images(
+    http_request: Request,
     request: GenerateImageRequest,
     background_tasks: BackgroundTasks,
 ):
@@ -87,6 +90,8 @@ async def generate_images(
     Start an image generation job.
 
     Executes generation in background.
+    Rate limited to 20 requests per minute.
+
     M1: In-process execution
     M2: Queue to Redis for worker consumption
     """

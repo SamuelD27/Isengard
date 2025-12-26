@@ -11,7 +11,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator
 
@@ -26,6 +26,7 @@ from packages.shared.src.types import (
 )
 from packages.shared.src.capabilities import is_capability_supported
 from packages.shared.src import redis_client
+from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_TRAINING
 
 from ..services.job_executor import (
     execute_training_job,
@@ -84,7 +85,9 @@ async def _list_jobs(character_id: str | None = None) -> list[TrainingJob]:
 
 
 @router.post("", response_model=TrainingJob, status_code=201)
+@rate_limit(**RATE_LIMIT_TRAINING)
 async def start_training(
+    http_request: Request,
     request: StartTrainingRequest,
     background_tasks: BackgroundTasks,
 ):
@@ -92,6 +95,8 @@ async def start_training(
     Start a new training job.
 
     Creates a job and executes it in the background.
+    Rate limited to 5 requests per minute.
+
     M1: In-process execution
     M2: Queue to Redis for worker consumption
     """

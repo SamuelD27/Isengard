@@ -64,12 +64,32 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS middleware
+    # CORS middleware - configure based on environment
+    # In development: allow localhost origins
+    # In production: restrict to configured origins only
+    if config.is_fast_test or config.mode == "development":
+        allowed_origins = [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+        ]
+    else:
+        # Production: only allow same-origin and explicitly configured origins
+        # Add additional origins via CORS_ORIGINS env var (comma-separated)
+        import os
+        cors_origins = os.getenv("CORS_ORIGINS", "")
+        allowed_origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+        if not allowed_origins:
+            # Default: same-origin only (no explicit origins needed)
+            allowed_origins = []
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://localhost:5173"],
+        allow_origins=allowed_origins,
+        allow_origin_regex=None if allowed_origins else r"https?://localhost:\d+",
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
