@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
 # Add project root to path
@@ -38,7 +39,7 @@ def test_volume_root(tmp_path_factory):
     return tmp
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client():
     """Create an async test client."""
     transport = ASGITransport(app=app)
@@ -185,11 +186,12 @@ class TestTrainingWorkflow:
         assert upload_resp.status_code == 201
 
         # 3. Start training (with minimal steps for fast testing)
+        # Note: TrainingConfig.steps has ge=100 validation
         train_resp = await client.post("/api/training", json={
             "character_id": char_id,
             "config": {
                 "method": "lora",
-                "steps": 10,  # Very few steps for fast testing
+                "steps": 100,  # Minimum allowed by validation
                 "learning_rate": 0.0001,
                 "lora_rank": 4
             }
@@ -382,10 +384,10 @@ class TestFullE2EWorkflow:
         upload_resp = await client.post(f"/api/characters/{char_id}/images", files=files)
         assert upload_resp.status_code == 201
 
-        # 3. Start training
+        # 3. Start training (steps must be >= 100 per TrainingConfig validation)
         train_resp = await client.post("/api/training", json={
             "character_id": char_id,
-            "config": {"steps": 10}
+            "config": {"steps": 100}
         })
         assert train_resp.status_code == 201
         train_job_id = train_resp.json()["id"]

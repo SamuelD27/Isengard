@@ -13,6 +13,9 @@ import pytest
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Configure pytest-asyncio mode
+pytest_plugins = ('pytest_asyncio',)
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_environment():
