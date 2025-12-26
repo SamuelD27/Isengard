@@ -169,10 +169,11 @@ Redis Streams provide better semantics than Lists (BLPOP) for job queues:
 
 ### Idempotency Strategy
 
-- Job ID is client-generated (UUID7 for time-ordering)
-- Before XADD, check if job ID exists in `isengard:jobs:index` hash
-- If exists, return existing job status
+- Job ID is server-generated (UUID7 for time-ordering)
+- API generates job ID on POST, returns it to client immediately
+- Before XADD, check if idempotency key exists in `isengard:jobs:idempotency` hash (if provided)
 - Worker uses XREADGROUP with consumer name for exactly-once processing
+- **Future enhancement:** Accept `Idempotency-Key` header for client-driven deduplication
 
 ### Retry Policy
 
@@ -360,13 +361,14 @@ docker-compose exec api pytest tests/
 - Replace in-memory storage with Redis
 - Implement job queue with Redis Streams
 - Consumer groups for worker scaling
-- Pub/sub for progress broadcasting
+- Progress events via Redis Streams (replayable)
 - Character/job persistence
 
 ### Acceptance Criteria
 - [ ] Jobs survive API restart
 - [ ] Worker consumes from Redis Streams (XREADGROUP)
-- [ ] Progress updates via Redis pub/sub to SSE
+- [ ] Progress updates via Redis Streams (`isengard:progress:{job_id}`)
+- [ ] SSE endpoint reads latest progress state from stream (XREVRANGE with limit 1)
 - [ ] Multiple workers can run in parallel (consumer group)
 - [ ] Job history queryable from Redis
 - [ ] Idempotent job submission
@@ -550,6 +552,8 @@ cat data/synthetic/char-001/manifest.json
 - [ ] Multiple concurrent generations supported
 
 ### ComfyUI Versioning Policy
+
+> **Source of Truth:** ComfyUI and custom node pins live in `sota/registry.yml`; this section describes policy, not the canonical pin.
 
 **Known-Good Version:** `v0.2.7` (or latest stable at implementation time)
 
