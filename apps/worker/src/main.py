@@ -1,10 +1,12 @@
 """
 Isengard Worker - Background Job Processor
 
-Consumes jobs from Redis queue and executes training/generation tasks.
+M2: Consumes jobs from Redis Streams via XREADGROUP.
+Executes training/generation tasks using registered plugins.
 """
 
 import asyncio
+import os
 import signal
 import sys
 from pathlib import Path
@@ -24,12 +26,15 @@ class Worker:
     """
     Background job worker.
 
-    Consumes jobs from Redis queue and processes them using registered plugins.
+    M2: Consumes jobs from Redis Streams using consumer groups.
+    Processes them using registered plugins.
     """
 
-    def __init__(self):
+    def __init__(self, consumer_name: str | None = None):
         self.config = get_global_config()
-        self.processor = JobProcessor()
+        # Consumer name for Redis consumer group (allow scaling with unique names)
+        self.consumer_name = consumer_name or os.getenv("WORKER_NAME", "worker-1")
+        self.processor = JobProcessor(consumer_name=self.consumer_name)
         self._shutdown = asyncio.Event()
         self._running = False
 
@@ -39,7 +44,9 @@ class Worker:
         self.config.ensure_directories()
 
         logger.info("Starting Isengard Worker", extra={
+            "event": "worker.start",
             "mode": self.config.mode,
+            "consumer_name": self.consumer_name,
             "concurrency": self.config.worker_concurrency,
             "redis_url": self.config.redis_url.split("@")[-1],  # Redact credentials
         })

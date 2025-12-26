@@ -2,11 +2,14 @@
 Training Endpoints
 
 Manage LoRA training jobs.
+
+M2: Uses Redis for job storage and queue.
 """
 
 import asyncio
+import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from sse_starlette.sse import EventSourceResponse
@@ -22,6 +25,7 @@ from packages.shared.src.types import (
     JobProgressEvent,
 )
 from packages.shared.src.capabilities import is_capability_supported
+from packages.shared.src import redis_client
 
 from ..services.job_executor import (
     execute_training_job,
@@ -32,18 +36,51 @@ from ..services.job_executor import (
 router = APIRouter()
 logger = get_logger("api.routes.training")
 
-# In-memory job storage (will be replaced with Redis in M2)
+# Feature flag for Redis mode
+USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
+
+# In-memory fallback for M1 compatibility
 _training_jobs: dict[str, TrainingJob] = {}
 
 # In-memory character storage reference (imported from characters route)
 from .characters import _characters, _load_all_characters, _save_character
 
 
-def _get_job_or_404(job_id: str) -> TrainingJob:
+async def _get_job_or_404(job_id: str) -> TrainingJob:
     """Get job by ID or raise 404."""
-    if job_id not in _training_jobs:
-        raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
-    return _training_jobs[job_id]
+    if USE_REDIS:
+        job_data = await redis_client.get_job(job_id)
+        if not job_data:
+            raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
+        return TrainingJob(**job_data)
+    else:
+        if job_id not in _training_jobs:
+            raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
+        return _training_jobs[job_id]
+
+
+async def _save_job(job: TrainingJob) -> None:
+    """Save job to storage."""
+    if USE_REDIS:
+        await redis_client.save_job(job.id, job.model_dump(mode="json"))
+    else:
+        _training_jobs[job.id] = job
+
+
+async def _list_jobs(character_id: str | None = None) -> list[TrainingJob]:
+    """List jobs from storage."""
+    if USE_REDIS:
+        jobs_data = await redis_client.list_jobs(job_type="training")
+        jobs = [TrainingJob(**j) for j in jobs_data]
+        if character_id:
+            jobs = [j for j in jobs if j.character_id == character_id]
+        return jobs
+    else:
+        jobs = list(_training_jobs.values())
+        if character_id:
+            jobs = [j for j in jobs if j.character_id == character_id]
+        jobs.sort(key=lambda j: j.created_at, reverse=True)
+        return jobs
 
 
 @router.post("", response_model=TrainingJob, status_code=201)
@@ -54,7 +91,9 @@ async def start_training(
     """
     Start a new training job.
 
-    Creates a job and executes it in the background (M1: in-process, M2: Redis queue).
+    Creates a job and executes it in the background.
+    M1: In-process execution
+    M2: Queue to Redis for worker consumption
     """
     # Ensure characters are loaded
     _load_all_characters()
@@ -94,26 +133,43 @@ async def start_training(
         status=JobStatus.QUEUED,
         config=request.config,
         total_steps=request.config.steps,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
 
-    _training_jobs[job_id] = job
+    # Save job
+    await _save_job(job)
 
     logger.info("Training job created", extra={
+        "event": "job.created",
         "job_id": job_id,
         "character_id": request.character_id,
         "method": request.config.method.value,
         "steps": request.config.steps,
+        "use_redis": USE_REDIS,
     })
 
-    # Execute job in background (M1: in-process, M2: would queue to Redis)
-    background_tasks.add_task(
-        execute_training_job,
-        job=job,
-        jobs_store=_training_jobs,
-        character_trigger_word=character.trigger_word,
-        correlation_id=correlation_id,
-    )
+    if USE_REDIS:
+        # Queue to Redis for worker consumption
+        await redis_client.submit_job(
+            stream=redis_client.STREAM_TRAINING,
+            job_id=job_id,
+            job_type="training",
+            payload=request.model_dump(mode="json"),
+            correlation_id=correlation_id,
+        )
+        logger.info("Training job queued to Redis", extra={
+            "event": "job.queued",
+            "job_id": job_id,
+        })
+    else:
+        # M1 fallback: Execute in-process
+        background_tasks.add_task(
+            execute_training_job,
+            job=job,
+            jobs_store=_training_jobs,
+            character_trigger_word=character.trigger_word,
+            correlation_id=correlation_id,
+        )
 
     return job
 
@@ -123,7 +179,7 @@ async def get_training_job(job_id: str):
     """
     Get training job status.
     """
-    return _get_job_or_404(job_id)
+    return await _get_job_or_404(job_id)
 
 
 @router.get("/{job_id}/stream")
@@ -134,12 +190,11 @@ async def stream_training_progress(job_id: str):
     Connect to this endpoint to receive real-time progress updates.
     All events include job_id and correlation_id.
     """
-    job = _get_job_or_404(job_id)
+    job = await _get_job_or_404(job_id)
     correlation_id = get_correlation_id()
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         """Generate SSE events for job progress."""
-        last_event_count = 0
 
         # Send initial state
         initial_event = JobProgressEvent(
@@ -151,44 +206,54 @@ async def stream_training_progress(job_id: str):
             current_step=job.current_step,
             total_steps=job.total_steps,
         )
-        # Include correlation_id in the event data
-        event_data = initial_event.model_dump()
-        event_data["correlation_id"] = correlation_id
         yield {"event": "progress", "data": initial_event.model_dump_json()}
 
-        # Poll for updates (M1: in-process, M2: would use Redis Streams)
-        while True:
-            await asyncio.sleep(0.5)  # Poll every 500ms for responsive updates
-
-            if job_id not in _training_jobs:
-                break
-
-            current_job = _training_jobs[job_id]
-
-            # Check for new progress events from executor
-            progress_events = get_job_progress_events(job_id)
-            if len(progress_events) > last_event_count:
-                # Send new events
-                for event in progress_events[last_event_count:]:
-                    event_data = event.model_dump()
-                    event_data["correlation_id"] = correlation_id
-                    yield {"event": "progress", "data": event.model_dump_json()}
-                last_event_count = len(progress_events)
-
-            # Stop streaming when job completes or fails
-            if current_job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
-                final_event = JobProgressEvent(
+        if USE_REDIS:
+            # Stream from Redis
+            async for progress in redis_client.stream_progress(job_id):
+                event = JobProgressEvent(
                     job_id=job_id,
                     job_type=JobType.TRAINING,
-                    status=current_job.status,
-                    progress=current_job.progress,
-                    message="Job finished" if current_job.status == JobStatus.COMPLETED else f"Job {current_job.status.value}",
-                    current_step=current_job.current_step,
-                    total_steps=current_job.total_steps,
-                    error=current_job.error_message,
+                    status=JobStatus(progress.get("status", "running")),
+                    progress=progress.get("progress", 0),
+                    message=progress.get("message", ""),
+                    current_step=progress.get("current_step", 0),
+                    total_steps=progress.get("total_steps", 0),
                 )
-                yield {"event": "complete", "data": final_event.model_dump_json()}
-                break
+                event_name = "complete" if event.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED] else "progress"
+                yield {"event": event_name, "data": event.model_dump_json()}
+        else:
+            # M1 fallback: Poll in-memory store
+            last_event_count = 0
+            while True:
+                await asyncio.sleep(0.5)
+
+                if job_id not in _training_jobs:
+                    break
+
+                current_job = _training_jobs[job_id]
+
+                # Check for new progress events from executor
+                progress_events = get_job_progress_events(job_id)
+                if len(progress_events) > last_event_count:
+                    for event in progress_events[last_event_count:]:
+                        yield {"event": "progress", "data": event.model_dump_json()}
+                    last_event_count = len(progress_events)
+
+                # Stop streaming when job completes
+                if current_job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                    final_event = JobProgressEvent(
+                        job_id=job_id,
+                        job_type=JobType.TRAINING,
+                        status=current_job.status,
+                        progress=current_job.progress,
+                        message="Job finished" if current_job.status == JobStatus.COMPLETED else f"Job {current_job.status.value}",
+                        current_step=current_job.current_step,
+                        total_steps=current_job.total_steps,
+                        error=current_job.error_message,
+                    )
+                    yield {"event": "complete", "data": final_event.model_dump_json()}
+                    break
 
     return EventSourceResponse(event_generator())
 
@@ -198,7 +263,7 @@ async def cancel_training(job_id: str):
     """
     Cancel a training job.
     """
-    job = _get_job_or_404(job_id)
+    job = await _get_job_or_404(job_id)
 
     if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
         raise HTTPException(
@@ -207,11 +272,22 @@ async def cancel_training(job_id: str):
         )
 
     job.status = JobStatus.CANCELLED
-    _training_jobs[job_id] = job
+    await _save_job(job)
 
-    # TODO: Send cancel signal to worker via Redis
+    if USE_REDIS:
+        # Publish cancellation event
+        await redis_client.publish_progress(
+            job_id=job_id,
+            status="cancelled",
+            progress=job.progress,
+            message="Job cancelled by user",
+            correlation_id=get_correlation_id(),
+        )
 
-    logger.info("Training job cancelled", extra={"job_id": job_id})
+    logger.info("Training job cancelled", extra={
+        "event": "job.cancelled",
+        "job_id": job_id,
+    })
 
     return job
 
@@ -221,12 +297,4 @@ async def list_training_jobs(character_id: str = None):
     """
     List training jobs, optionally filtered by character.
     """
-    jobs = list(_training_jobs.values())
-
-    if character_id:
-        jobs = [j for j in jobs if j.character_id == character_id]
-
-    # Sort by created_at descending
-    jobs.sort(key=lambda j: j.created_at, reverse=True)
-
-    return jobs
+    return await _list_jobs(character_id)
