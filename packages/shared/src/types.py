@@ -154,6 +154,12 @@ class GenerationConfig(BaseModel):
     lora_id: str | None = Field(None, description="Character LoRA to use")
     lora_strength: float = Field(0.8, ge=0.0, le=1.5, description="LoRA strength")
 
+    # Toggle options for advanced features
+    use_controlnet: bool = Field(False, description="Enable ControlNet for pose/composition control")
+    use_ipadapter: bool = Field(False, description="Enable IP-Adapter for reference image guidance")
+    use_facedetailer: bool = Field(False, description="Enable FaceDetailer for face enhancement")
+    use_upscale: bool = Field(False, description="Enable upscaling for higher resolution output")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -164,7 +170,11 @@ class GenerationConfig(BaseModel):
                 "steps": 30,
                 "guidance_scale": 7.5,
                 "lora_id": "char-abc123",
-                "lora_strength": 0.8
+                "lora_strength": 0.8,
+                "use_controlnet": False,
+                "use_ipadapter": False,
+                "use_facedetailer": True,
+                "use_upscale": False
             }
         }
 
