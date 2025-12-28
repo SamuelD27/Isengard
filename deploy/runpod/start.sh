@@ -395,3 +395,71 @@ echo ""
 
 # Keep container running
 tail -f /dev/null
+
+# ============================================================
+# 11. AI-TOOLKIT SETUP (for training)
+# ============================================================
+header "Setting up AI-Toolkit"
+
+AITOOLKIT_REPO="${VOLUME_ROOT}/ai-toolkit"
+AITOOLKIT_VENV="${VOLUME_ROOT}/.venvs/aitoolkit"
+
+# Clone or update AI-Toolkit
+if [ -d "${AITOOLKIT_REPO}/.git" ]; then
+    log "AI-Toolkit repo exists"
+else
+    log "Cloning AI-Toolkit..."
+    git clone https://github.com/ostris/ai-toolkit.git "${AITOOLKIT_REPO}"
+fi
+
+# Create venv if needed
+if [ \! -f "${AITOOLKIT_VENV}/bin/python" ]; then
+    log "Creating AI-Toolkit venv..."
+    python3.11 -m venv --system-site-packages "${AITOOLKIT_VENV}"
+    "${AITOOLKIT_VENV}/bin/pip" install --quiet --upgrade pip
+    "${AITOOLKIT_VENV}/bin/pip" install --quiet -r "${AITOOLKIT_REPO}/requirements.txt"
+fi
+
+# Add to PYTHONPATH via .pth
+SITE_PACKAGES=$("${AITOOLKIT_VENV}/bin/python" -c "import site; print(site.getsitepackages()[0])")
+echo "${AITOOLKIT_REPO}" > "${SITE_PACKAGES}/aitoolkit.pth"
+
+# Patch AI-Toolkit plugin if not already patched
+PLUGIN_FILE="/app/packages/plugins/training/src/ai_toolkit.py"
+if [ -f "$PLUGIN_FILE" ] && \! grep -q "aitoolkit_venv_python" "$PLUGIN_FILE"; then
+    log "Patching AI-Toolkit plugin..."
+    python3 << 'PATCHPY'
+import re
+plugin_file = "/app/packages/plugins/training/src/ai_toolkit.py"
+with open(plugin_file, "r") as f:
+    content = f.read()
+old_pattern = r'cmd = \["python", "-m", "toolkit\.job", str\(config_path\)\]'
+new_cmd = '# AI-Toolkit venv path
+        aitoolkit_venv_python = "/runpod-volume/isengard/.venvs/aitoolkit/bin/python"
+        aitoolkit_run_py = "/runpod-volume/isengard/ai-toolkit/run.py"
+        cmd = [aitoolkit_venv_python, aitoolkit_run_py, str(config_path)]'
+content = re.sub(old_pattern, new_cmd, content)
+if "cwd=\"/runpod-volume" not in content:
+    content = re.sub(
+        r'(process = subprocess\.Popen\(\s*cmd,\s*stdout=subprocess\.PIPE,\s*stderr=subprocess\.STDOUT,\s*text=True,\s*bufsize=1,)',
+        r'\1\n            cwd="/runpod-volume/isengard/ai-toolkit",\n            env={**os.environ, "PYTHONUNBUFFERED": "1", "HF_HOME": "/runpod-volume/isengard/.cache/huggingface"},',
+        content
+    )
+with open(plugin_file, "w") as f:
+    f.write(content)
+PATCHPY
+    log "Plugin patched"
+else
+    log "Plugin already patched or not found"
+fi
+
+# Create unet symlinks
+mkdir -p /opt/ComfyUI/models/unet
+ln -sf "${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors" /opt/ComfyUI/models/unet/ 2>/dev/null || true
+ln -sf "${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors" /opt/ComfyUI/models/unet/ 2>/dev/null || true
+
+log "AI-Toolkit setup complete"
+
+
+# Keep container running
+tail -f /dev/null

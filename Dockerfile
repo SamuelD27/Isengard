@@ -55,6 +55,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     vim \
     jq \
+    # Web server / reverse proxy
+    nginx \
     && rm -rf /var/lib/apt/lists/*
 
 # Install rclone for ultra-fast R2 downloads
@@ -109,6 +111,10 @@ EXPOSE 8188
 # ============================================================
 # AI-Toolkit for LoRA Training
 # ============================================================
+# Note: The pip package provides some dependencies, but actual training
+# uses a git clone at /runpod-volume/isengard/ai-toolkit/ with an
+# isolated venv. This is set up by start.sh at runtime because the
+# pip package has module path issues ('ostris_ai_toolkit.toolkit' vs 'toolkit').
 RUN uv pip install --system ostris-ai-toolkit
 
 # ============================================================
@@ -165,9 +171,19 @@ RUN npm run build
 WORKDIR /app
 
 # Copy startup script and secrets
-COPY deploy/runpod/start.sh /start.sh
+# NOTE: start.sh is at repo root (not deploy/runpod/) - contains nginx, AI-Toolkit setup, version banner
+COPY start.sh /start.sh
 COPY deploy/runpod/secrets.sh /secrets.sh
-RUN chmod +x /start.sh /secrets.sh
+
+# Create version marker for verification
+RUN echo "BOOTSTRAP_VERSION=v2.1.0-nginx-aitoolkit BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
+    && sha256sum /start.sh >> /app/BOOTSTRAP_VERSION
+
+# Copy helper scripts for pod management
+COPY scripts/bootstrap_pod.sh /app/scripts/bootstrap_pod.sh
+COPY scripts/restart_services.sh /app/scripts/restart_services.sh
+
+RUN chmod +x /start.sh /secrets.sh /app/scripts/*.sh
 
 # ============================================================
 # Environment
