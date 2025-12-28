@@ -17,6 +17,7 @@ from typing import AsyncGenerator
 
 from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import get_logger, get_correlation_id
+from ..middleware import get_interaction_id
 from packages.shared.src.types import (
     GenerationJob,
     GenerateImageRequest,
@@ -27,6 +28,9 @@ from packages.shared.src.types import (
 from packages.shared.src.capabilities import is_capability_supported
 from packages.shared.src import redis_client
 from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_GENERATION
+
+from ..services.config_validator import validate_generation_config
+from .health import _get_image_plugin
 
 from ..services.job_executor import (
     execute_generation_job,
@@ -107,6 +111,11 @@ async def generate_images(
                 detail="Image generation is not available in production mode yet"
             )
 
+    # Validate config against plugin capabilities
+    image_plugin = _get_image_plugin()
+    capabilities = image_plugin.get_capabilities()
+    validate_generation_config(request.config.model_dump(mode="json"), capabilities)
+
     # Validate LoRA if specified
     if request.config.lora_id:
         if request.config.lora_id not in _characters:
@@ -125,6 +134,7 @@ async def generate_images(
     # Create job with server-generated ID
     job_id = f"gen-{uuid.uuid4().hex[:12]}"
     correlation_id = get_correlation_id()
+    interaction_id = get_interaction_id()
 
     job = GenerationJob(
         id=job_id,
@@ -136,7 +146,8 @@ async def generate_images(
     # Save job
     await _save_job(job)
 
-    logger.info("Generation job created", extra={
+    # Log with UELR event type for tracing
+    log_extra = {
         "event": "job.created",
         "job_id": job_id,
         "prompt": request.config.prompt[:50] + "..." if len(request.config.prompt) > 50 else request.config.prompt,
@@ -150,7 +161,10 @@ async def generate_images(
             "use_facedetailer": request.config.use_facedetailer,
             "use_upscale": request.config.use_upscale,
         },
-    })
+    }
+    if interaction_id:
+        log_extra["interaction_id"] = interaction_id
+    logger.info("Generation job created", extra=log_extra)
 
     if USE_REDIS:
         # Queue to Redis for worker consumption
@@ -298,3 +312,35 @@ async def list_generation_jobs(limit: int = 20):
     List recent generation jobs.
     """
     return await _list_jobs(limit)
+
+
+@router.get("/output/{filename}")
+async def get_generation_output(filename: str):
+    """
+    Serve a generated image output.
+    """
+    from fastapi.responses import FileResponse
+    import re
+
+    # Sanitize filename to prevent path traversal
+    safe_filename = re.sub(r"[^\w\-\.]", "", filename)
+    if not safe_filename or safe_filename != filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    config = get_global_config()
+    output_path = config.outputs_dir / safe_filename
+
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Output file not found")
+
+    # Verify the file is inside outputs_dir (prevent path traversal)
+    try:
+        output_path.resolve().relative_to(config.outputs_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    return FileResponse(
+        path=output_path,
+        media_type="image/png",
+        filename=safe_filename
+    )

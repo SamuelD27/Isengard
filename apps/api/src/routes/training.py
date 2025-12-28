@@ -17,6 +17,7 @@ from typing import AsyncGenerator
 
 from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import get_logger, get_correlation_id
+from ..middleware import get_interaction_id
 from packages.shared.src.types import (
     TrainingJob,
     StartTrainingRequest,
@@ -25,6 +26,9 @@ from packages.shared.src.types import (
     JobProgressEvent,
 )
 from packages.shared.src.capabilities import is_capability_supported
+
+from ..services.config_validator import validate_training_config
+from .health import _get_training_plugin
 from packages.shared.src import redis_client
 from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_TRAINING
 
@@ -110,6 +114,11 @@ async def start_training(
             detail=f"Training method '{request.config.method.value}' is not supported"
         )
 
+    # Validate config against plugin capabilities
+    training_plugin = _get_training_plugin()
+    capabilities = training_plugin.get_capabilities()
+    validate_training_config(request.config.model_dump(mode="json"), capabilities)
+
     # Validate character exists
     if request.character_id not in _characters:
         raise HTTPException(
@@ -131,6 +140,7 @@ async def start_training(
     # Create job with server-generated UUID7-style ID
     job_id = f"train-{uuid.uuid4().hex[:12]}"
     correlation_id = get_correlation_id()
+    interaction_id = get_interaction_id()
 
     job = TrainingJob(
         id=job_id,
@@ -144,14 +154,18 @@ async def start_training(
     # Save job
     await _save_job(job)
 
-    logger.info("Training job created", extra={
+    # Log with UELR event type for tracing
+    log_extra = {
         "event": "job.created",
         "job_id": job_id,
         "character_id": request.character_id,
         "method": request.config.method.value,
         "steps": request.config.steps,
         "use_redis": USE_REDIS,
-    })
+    }
+    if interaction_id:
+        log_extra["interaction_id"] = interaction_id
+    logger.info("Training job created", extra=log_extra)
 
     if USE_REDIS:
         # Queue to Redis for worker consumption

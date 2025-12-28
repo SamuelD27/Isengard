@@ -331,3 +331,75 @@ async def list_training_images(character_id: str):
         "images": images,
         "count": len(images),
     }
+
+
+@router.get("/{character_id}/images/{filename}")
+async def get_image(character_id: str, filename: str):
+    """
+    Serve a training image for preview.
+    """
+    from fastapi.responses import FileResponse
+    
+    _get_character_or_404(character_id)
+    config = get_global_config()
+    
+    # Sanitize filename
+    safe_filename = sanitize_filename(filename)
+    
+    upload_dir = config.uploads_dir / character_id
+    file_path = upload_dir / safe_filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    # Ensure file is within upload directory (prevent path traversal)
+    try:
+        file_path.resolve().relative_to(upload_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    return FileResponse(
+        path=file_path,
+        media_type="image/jpeg",
+        filename=safe_filename,
+    )
+
+
+@router.delete("/{character_id}/images/{filename}", status_code=204)
+async def delete_image(character_id: str, filename: str):
+    """
+    Delete a training image.
+    """
+    character = _get_character_or_404(character_id)
+    config = get_global_config()
+    
+    # Sanitize filename
+    safe_filename = sanitize_filename(filename)
+    
+    upload_dir = config.uploads_dir / character_id
+    file_path = upload_dir / safe_filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    # Ensure file is within upload directory
+    try:
+        file_path.resolve().relative_to(upload_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    # Delete the file
+    file_path.unlink()
+    
+    # Update character image count
+    remaining_images = len(list(upload_dir.glob("*")))
+    character.image_count = remaining_images
+    character.updated_at = datetime.utcnow()
+    _save_character(character)
+    
+    logger.info("Image deleted", extra={
+        "event": "image.deleted",
+        "character_id": character_id,
+        "filename": safe_filename,
+        "remaining_images": remaining_images,
+    })
