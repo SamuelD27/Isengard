@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import configure_logging, get_logger
 
-from .routes import health, characters, training, generation, logs
+from .routes import health, characters, training, generation, logs, jobs, uelr
 from .middleware import CorrelationIDMiddleware
 
 logger = get_logger("api.main")
@@ -97,11 +97,19 @@ def create_app() -> FastAPI:
     app.add_middleware(CorrelationIDMiddleware)
 
     # Include routers
-    app.include_router(health.router, tags=["Health"])
+    # Health endpoints under /api for frontend compatibility
+    app.include_router(health.router, prefix="/api", tags=["Health"])
+
+    # Also expose root /health for backwards compatibility (Docker health checks, etc.)
+    @app.get("/health", include_in_schema=False)
+    async def root_health():
+        return {"status": "healthy"}
     app.include_router(characters.router, prefix="/api/characters", tags=["Characters"])
     app.include_router(training.router, prefix="/api/training", tags=["Training"])
     app.include_router(generation.router, prefix="/api/generation", tags=["Generation"])
     app.include_router(logs.router, prefix="/api/client-logs", tags=["Client Logs"])
+    app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
+    app.include_router(uelr.router, prefix="/api/uelr", tags=["UELR"])
 
     return app
 
