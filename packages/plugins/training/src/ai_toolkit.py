@@ -25,12 +25,17 @@ from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import get_logger
 from packages.shared.src.types import TrainingConfig, TrainingMethod
 
-from .interface import TrainingPlugin, TrainingProgress, TrainingResult
+from .interface import TrainingPlugin, TrainingProgress, TrainingResult, TrainingCapabilities
 
 logger = get_logger("plugins.training.ai_toolkit")
 
 # Regex patterns for parsing AI-Toolkit output
+# Matches: "step: 10/100", "step 10 100", "Step: 10/100"
 STEP_PATTERN = re.compile(r"step[:\s]+(\d+)[/\s]+(\d+)", re.IGNORECASE)
+# Matches tqdm format: "50%|████████| 50/100 [00:10<00:10]" or just "50/100"
+TQDM_PATTERN = re.compile(r"(\d+)%\|[^|]*\|\s*(\d+)/(\d+)")
+# Simple fraction pattern: " 50/100 " or "|50/100|"
+FRACTION_PATTERN = re.compile(r"[\s|](\d+)/(\d+)[\s|\[]")
 LOSS_PATTERN = re.compile(r"loss[:\s]+([0-9.]+)", re.IGNORECASE)
 LR_PATTERN = re.compile(r"lr[:\s]+([0-9.e\-]+)", re.IGNORECASE)
 
@@ -59,6 +64,116 @@ class AIToolkitPlugin(TrainingPlugin):
     @property
     def supported_methods(self) -> list[TrainingMethod]:
         return [TrainingMethod.LORA]
+
+    def get_capabilities(self) -> TrainingCapabilities:
+        """
+        Return AI-Toolkit training capabilities.
+
+        Parameters marked as wired=True are actively used by the training config.
+        Parameters marked as wired=False are defined but not yet implemented.
+        """
+        return {
+            "method": "lora",
+            "backend": "ai-toolkit",
+            "parameters": {
+                # Wired parameters - actively used
+                "steps": {
+                    "type": "int",
+                    "min": 100,
+                    "max": 10000,
+                    "default": 1000,
+                    "wired": True,
+                    "description": "Total training steps",
+                },
+                "learning_rate": {
+                    "type": "float",
+                    "min": 1e-6,
+                    "max": 0.01,
+                    "step": 1e-6,
+                    "default": 0.0001,
+                    "wired": True,
+                    "description": "Learning rate for optimizer",
+                },
+                "lora_rank": {
+                    "type": "enum",
+                    "options": [4, 8, 16, 32, 64, 128],
+                    "default": 16,
+                    "wired": True,
+                    "description": "LoRA rank (higher = more capacity, more VRAM)",
+                },
+                "resolution": {
+                    "type": "enum",
+                    "options": [512, 768, 1024],
+                    "default": 1024,
+                    "wired": True,
+                    "description": "Training image resolution",
+                },
+                "batch_size": {
+                    "type": "enum",
+                    "options": [1, 2, 4],
+                    "default": 1,
+                    "wired": True,
+                    "description": "Training batch size (higher = more VRAM)",
+                },
+                "optimizer": {
+                    "type": "enum",
+                    "options": ["adamw8bit", "adamw", "prodigy"],
+                    "default": "adamw8bit",
+                    "wired": True,
+                    "description": "Optimizer algorithm",
+                },
+                "scheduler": {
+                    "type": "enum",
+                    "options": ["constant", "cosine", "cosine_with_restarts", "linear"],
+                    "default": "cosine",
+                    "wired": True,
+                    "description": "Learning rate scheduler",
+                },
+                "precision": {
+                    "type": "enum",
+                    "options": ["bf16", "fp16", "fp32"],
+                    "default": "bf16",
+                    "wired": True,
+                    "description": "Training precision (bf16 recommended)",
+                },
+                # Unwired parameters - planned for Phase 2
+                "gradient_accumulation": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 8,
+                    "default": 1,
+                    "wired": False,
+                    "reason": "Not yet implemented in AI-Toolkit adapter",
+                    "description": "Gradient accumulation steps",
+                },
+                "network_alpha": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 128,
+                    "default": 16,
+                    "wired": False,
+                    "reason": "Planned for Phase 2",
+                    "description": "LoRA alpha scaling factor",
+                },
+                "caption_strategy": {
+                    "type": "enum",
+                    "options": ["trigger_only", "natural", "tags"],
+                    "default": "trigger_only",
+                    "wired": False,
+                    "reason": "Planned for Phase 2",
+                    "description": "How captions are generated for training",
+                },
+                "checkpoint_every": {
+                    "type": "int",
+                    "min": 100,
+                    "max": 5000,
+                    "default": 500,
+                    "wired": False,
+                    "reason": "Planned for Phase 2",
+                    "description": "Save checkpoint every N steps",
+                },
+            },
+        }
 
     async def validate_config(self, config: TrainingConfig) -> tuple[bool, str | None]:
         """
@@ -316,7 +431,10 @@ class AIToolkitPlugin(TrainingPlugin):
         """
         # Find AI-Toolkit run script
         # It could be installed as a package or as a local clone
-        cmd = ["python", "-m", "toolkit.job", str(config_path)]
+        # AI-Toolkit venv and run.py path (configured for pod isolation)
+        aitoolkit_venv_python = "/runpod-volume/isengard/.venvs/aitoolkit/bin/python"
+        aitoolkit_run_py = "/runpod-volume/isengard/ai-toolkit/run.py"
+        cmd = [aitoolkit_venv_python, aitoolkit_run_py, str(config_path)]
 
         logger.info("Starting AI-Toolkit training", extra={
             "event": "training.subprocess_start",
@@ -330,15 +448,87 @@ class AIToolkitPlugin(TrainingPlugin):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            cwd="/runpod-volume/isengard/ai-toolkit",
+            env={**os.environ, "PYTHONUNBUFFERED": "1", "HF_HOME": "/runpod-volume/isengard/cache/huggingface"},
         )
 
         current_step = 0
         current_loss = None
+        last_progress_time = time.time()
+        output_buffer = ""
+
+        def parse_and_emit_progress(text: str):
+            """Parse progress from text and emit callback if progress found."""
+            nonlocal current_step, current_loss, total_steps, last_progress_time
+
+            new_step = None
+            new_total = None
+
+            # Try all patterns - prioritize explicit step patterns
+            step_match = STEP_PATTERN.search(text)
+            tqdm_match = TQDM_PATTERN.search(text) if not step_match else None
+            # Only use fraction pattern if it looks like progress (total is reasonable)
+            frac_match = FRACTION_PATTERN.search(text) if not step_match and not tqdm_match else None
+
+            if step_match:
+                new_step = int(step_match.group(1))
+                new_total = int(step_match.group(2))
+            elif tqdm_match:
+                new_step = int(tqdm_match.group(2))
+                new_total = int(tqdm_match.group(3))
+            elif frac_match:
+                candidate_step = int(frac_match.group(1))
+                candidate_total = int(frac_match.group(2))
+                # Only accept if total is reasonable (within 2x of expected)
+                if candidate_total > 50 and candidate_total <= total_steps * 2:
+                    new_step = candidate_step
+                    new_total = candidate_total
+
+            # Only update if new step is forward progress (never go backwards)
+            if new_step is not None and new_step >= current_step:
+                current_step = new_step
+                if new_total and new_total != total_steps and new_total > 0:
+                    total_steps = new_total
+
+            loss_match = LOSS_PATTERN.search(text)
+            if loss_match:
+                current_loss = float(loss_match.group(1))
+
+        def check_samples_for_progress(samples_dir: Path):
+            """Fallback: detect progress from sample filenames."""
+            nonlocal current_step
+            try:
+                if samples_dir.exists():
+                    samples = list(samples_dir.glob("*.jpg"))
+                    if samples:
+                        # Get latest sample, extract step from filename
+                        latest = max(samples, key=lambda p: p.stat().st_mtime)
+                        # Filename format: {timestamp}__{step 9 digits}_{idx}.jpg
+                        match = re.search(r"__(\d{9})_", latest.name)
+                        if match:
+                            step = int(match.group(1))
+                            if step > current_step:
+                                current_step = step
+                                return True
+            except Exception:
+                pass
+            return False
 
         try:
-            # Read output line by line
-            for line in iter(self._process.stdout.readline, ""):
+            import select
+            import fcntl
+            import os as os_module
+
+            # Make stdout non-blocking
+            fd = self._process.stdout.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os_module.O_NONBLOCK)
+
+            # Get training output directory from config path (config.yaml is in the training folder)
+            training_folder = config_path.parent / "output"
+            samples_dir = training_folder / "lora_ohwx_person" / "samples" if training_folder.exists() else None
+
+            while self._process.poll() is None:
                 if self._cancelled:
                     self._process.terminate()
                     return TrainingResult(
@@ -347,43 +537,63 @@ class AIToolkitPlugin(TrainingPlugin):
                         error_message="Training cancelled",
                     )
 
-                line = line.strip()
-                if not line:
-                    continue
+                # Non-blocking read with select
+                readable, _, _ = select.select([self._process.stdout], [], [], 0.5)
+                if readable:
+                    try:
+                        chunk = self._process.stdout.read(4096)
+                        if chunk is not None and chunk:
+                            output_buffer += chunk
+                            # Parse on \r or \n boundaries (tqdm uses \r)
+                            while "\r" in output_buffer or "\n" in output_buffer:
+                                # Find first delimiter
+                                r_pos = output_buffer.find("\r")
+                                n_pos = output_buffer.find("\n")
+                                if r_pos == -1:
+                                    pos = n_pos
+                                elif n_pos == -1:
+                                    pos = r_pos
+                                else:
+                                    pos = min(r_pos, n_pos)
 
-                # Parse progress from output
-                step_match = STEP_PATTERN.search(line)
-                if step_match:
-                    current_step = int(step_match.group(1))
-                    total = int(step_match.group(2))
-                    if total != total_steps:
-                        total_steps = total  # Update if AI-Toolkit reports different
+                                line = output_buffer[:pos].strip()
+                                output_buffer = output_buffer[pos + 1:]
 
-                loss_match = LOSS_PATTERN.search(line)
-                if loss_match:
-                    current_loss = float(loss_match.group(1))
+                                if line:
+                                    parse_and_emit_progress(line)
 
-                lr_match = LR_PATTERN.search(line)
-                current_lr = float(lr_match.group(1)) if lr_match else None
+                                    # Log significant lines
+                                    if any(kw in line.lower() for kw in ["error", "exception", "saved", "sample"]):
+                                        logger.info(f"AI-Toolkit: {line}")
+                    except BlockingIOError:
+                        pass
 
-                # Emit progress
+                # Fallback: check sample files every 5 seconds
+                if samples_dir and time.time() - last_progress_time > 5:
+                    if check_samples_for_progress(samples_dir):
+                        last_progress_time = time.time()
+
+                # Emit progress callback
                 if progress_callback and current_step > 0:
                     progress = TrainingProgress(
                         current_step=current_step,
                         total_steps=total_steps,
                         loss=current_loss,
-                        learning_rate=current_lr,
+                        learning_rate=None,
                         message=f"Step {current_step}/{total_steps}",
                     )
-                    # Handle both sync and async callbacks
                     if asyncio.iscoroutinefunction(progress_callback):
                         await progress_callback(progress)
                     else:
                         progress_callback(progress)
 
-                # Log significant lines
-                if any(keyword in line.lower() for keyword in ["error", "exception", "saved", "sample"]):
-                    logger.info(f"AI-Toolkit: {line}")
+            # Read any remaining output
+            try:
+                remaining = self._process.stdout.read()
+                if remaining is not None and remaining:
+                    parse_and_emit_progress(remaining)
+            except Exception:
+                pass  # Ignore read errors at end
 
             # Wait for process to complete
             return_code = self._process.wait()

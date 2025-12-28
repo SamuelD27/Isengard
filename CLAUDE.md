@@ -10,6 +10,100 @@ Isengard is a **GUI-first platform** for creating personalized AI-generated cont
 
 ---
 
+## Architectural Guardrails (Locked)
+
+> **These patterns are working. Do not deviate without explicit justification.**
+
+### Separation of Concerns (Mandatory)
+```
+React UI (apps/web) ⇄ FastAPI API (apps/api) ⇄ Worker (apps/worker) ⇄ Plugins (packages/plugins)
+```
+- Frontend ONLY talks to API via HTTP/SSE
+- API queues jobs to Redis; Worker consumes them
+- Plugins are loaded by Worker, never imported directly by API
+
+### Plugin Architecture (Mandatory)
+- Training/Image/Video backends are **swappable modules** with stable interfaces
+- Each plugin lives in `packages/plugins/{type}/src/` with `interface.py` defining the contract
+- NO monolithic scripts; NO hardcoded AI logic in route handlers
+- Adding a new backend = implement interface + register in plugin registry
+
+### Persistent Storage (Mandatory)
+- Heavy artifacts (models, outputs, uploads) → `VOLUME_ROOT` (`/runpod-volume/isengard`)
+- Container filesystem = ephemeral caches only
+- Path resolution via `packages/shared/src/config.py`, never hardcoded
+
+### Fast-Test vs Production Modes (Mandatory)
+- `ISENGARD_MODE=fast-test` → Mock plugins, no GPU, for CI/UI testing
+- `ISENGARD_MODE=production` → Real AI-Toolkit + ComfyUI
+- Both modes MUST work; tests run in fast-test, prod deploys in production
+
+### Workflow Templates (Mandatory)
+- ComfyUI graphs live in `packages/plugins/image/workflows/*.json`
+- Workflows are versioned, named files (e.g., `flux-dev-lora.json`)
+- NO inline workflow construction in random code paths
+- Template placeholders replaced at runtime by `comfyui.py`
+
+### UX Philosophy (Mandatory)
+- GUI-first: every feature accessible through web UI
+- Progressive disclosure: presets visible, advanced settings collapsed
+- Minimal dark theme, professional aesthetic
+- Pages: Characters → Dataset → Training → Generate (+ Video scaffold)
+- Real-time feedback: SSE for progress, staging workflows for review
+
+### Quality Discipline (Mandatory)
+- Fix root causes, not symptoms
+- Never disable features to make tests pass
+- Add logging/tests when fixing bugs
+- If it's broken, mark entire feature as not-ready rather than ship broken
+
+---
+
+## Implemented Features (Do Not Regress)
+
+> **These features are working in production. Any PR that breaks them is rejected.**
+
+### Character Management
+- [x] Inline image upload during character creation (not post-creation only)
+- [x] Character detail view with image preview grid
+- [x] Individual image deletion with confirmation
+- [x] Trigger word display and copy
+
+### Dataset Manager
+- [x] Global image grid across all characters
+- [x] Search by filename or character name
+- [x] Filter by character dropdown
+- [x] Multi-select with visual checkboxes
+- [x] Bulk delete with confirmation dialog
+
+### Training System
+- [x] Training presets (Quick/Balanced/High Quality)
+- [x] Advanced parameters (optimizer, scheduler, precision, batch size)
+- [x] SSE live log streaming with auto-scroll
+- [x] Job history with config summary display
+- [x] Estimated training time calculation
+
+### Image Generation
+- [x] 7 aspect ratio presets with dimension calculation
+- [x] Quality tiers (Draft/Standard/High Quality)
+- [x] Advanced toggles (ControlNet, IP-Adapter, FaceDetailer, Upscale)
+- [x] LoRA selection from trained characters
+- [x] Output gallery for completed jobs
+
+### Synthetic Generation
+- [x] Generate button visible only for trained characters
+- [x] Staging area with Keep/Discard workflow
+- [x] Batch generation (1/2/4/8 images)
+- [x] Auto-save kept images to training dataset
+
+### FLUX Workflows
+- [x] Disaggregated loader pattern: `UNETLoader` + `DualCLIPLoader` + `VAELoader`
+- [x] Symlinks from checkpoints → unet folder for FLUX compatibility
+- [x] Four workflow variants: schnell, dev, schnell-lora, dev-lora
+- [x] LoraLoaderModelOnly for trained character LoRAs
+
+---
+
 ## Non-Negotiables
 
 These rules are **absolute** and override any convenience shortcuts:
@@ -68,6 +162,77 @@ These rules are **absolute** and override any convenience shortcuts:
 - ComfyUI workflows should use stable node names, not version-specific hacks
 - Pin critical dependencies in requirements.txt / package.json
 - Design for safe upgrades: isolate version-specific code in adapters
+
+### 9. Double-Apply Doctrine (Remote + Local Sync) - CRITICAL
+
+> **Every modification made on a remote RunPod instance MUST also be applied to the local repository.**
+
+When debugging or fixing issues on a live RunPod deployment, code changes are often made directly on the pod to quickly resolve problems. However, these changes are **ephemeral** - they will be lost when:
+- The pod is restarted or terminated
+- A new Docker image is deployed
+- The pod is recreated from template
+
+#### Mandatory Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  1. Connect to RunPod                                           │
+│     ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519               │
+├─────────────────────────────────────────────────────────────────┤
+│  2. Make fix on remote pod                                      │
+│     (edit files in /app or /runpod-volume/isengard)            │
+├─────────────────────────────────────────────────────────────────┤
+│  3. IMMEDIATELY apply same fix to local repo                    │
+│     (edit corresponding files in ~/OF/Isengard)                │
+├─────────────────────────────────────────────────────────────────┤
+│  4. Commit to git with descriptive message                      │
+│     git add . && git commit -m "fix: <description>"            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Claude Code Responsibilities
+
+When working with remote pods, Claude Code MUST:
+
+1. **Track all remote edits** - Keep a mental list of every file modified on the pod
+2. **Mirror changes immediately** - After each remote fix, apply to local repo before moving on
+3. **Verify parity** - Compare remote files with local to ensure sync:
+   ```bash
+   # Compare remote and local file
+   ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "cat /app/path/to/file.py" > /tmp/remote.py
+   diff /tmp/remote.py ~/OF/Isengard/path/to/file.py
+   ```
+4. **Never leave session without syncing** - At end of any remote session, confirm all changes are in local repo
+
+#### Common Remote Locations → Local Equivalents
+
+| Remote Path | Local Path |
+|-------------|------------|
+| `/app/apps/api/src/` | `apps/api/src/` |
+| `/app/apps/web/src/` | `apps/web/src/` |
+| `/app/packages/plugins/` | `packages/plugins/` |
+| `/app/packages/shared/` | `packages/shared/` |
+| `/runpod-volume/isengard/` | `data/` (for artifacts) |
+
+#### SSH Connection Template
+
+```bash
+# Standard connection
+ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519
+
+# Quick file comparison
+ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "cat /app/<file>" | diff - ~/OF/Isengard/<file>
+
+# Bulk file list for comparison
+ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "find /app -name '*.py' -type f" | sort
+```
+
+#### Red Flags (Never Do These)
+
+- ❌ Fix a bug on the pod and forget to apply locally
+- ❌ Make "temporary" fixes that never get committed
+- ❌ End a session with unsynced changes
+- ❌ Push a new Docker image without including all pod fixes
 
 ---
 
@@ -365,6 +530,232 @@ tail -f logs/api/latest/api.log | jq .
 
 ---
 
+## Training Debugging Workflow
+
+> **When a training bug occurs, Claude Code MUST follow this exact workflow.**
+
+### 5-Step Debug Protocol (Mandatory)
+
+When investigating any training failure:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STEP 1: Identify job_id + correlation_id                               │
+│  ────────────────────────────────────────────────────────────────────── │
+│  • Check UI error message for job_id (e.g., "train-abc123")            │
+│  • Check API response headers for X-Correlation-ID                      │
+│  • If missing, search logs: grep "job_id" logs/api/latest/api.log      │
+├─────────────────────────────────────────────────────────────────────────┤
+│  STEP 2: Pull events.jsonl + service logs                               │
+│  ────────────────────────────────────────────────────────────────────── │
+│  • Per-job log: logs/jobs/{job_id}/events.jsonl                        │
+│  • API logs: logs/api/latest/api.log                                   │
+│  • Worker logs: logs/worker/latest/worker.log                          │
+│  • Or use API: GET /api/jobs/{job_id}/logs                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│  STEP 3: Find first error event                                         │
+│  ────────────────────────────────────────────────────────────────────── │
+│  • In events.jsonl: grep -n '"level":"ERROR"' events.jsonl | head -1   │
+│  • Note timestamp, event type, error message, stack trace              │
+│  • Or use API: GET /api/jobs/{job_id}/logs/view?level=ERROR            │
+├─────────────────────────────────────────────────────────────────────────┤
+│  STEP 4: Provide root cause + minimal fix                               │
+│  ────────────────────────────────────────────────────────────────────── │
+│  • Cite specific log entries as evidence                               │
+│  • Trace error back through correlation_id                             │
+│  • Identify which component failed (API/Worker/Plugin)                 │
+│  • Propose targeted fix (not shotgun debugging)                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  STEP 5: Add regression test or Fast-Test reproduction                  │
+│  ────────────────────────────────────────────────────────────────────── │
+│  • Add test to tests/test_training_observability.py                    │
+│  • Or create minimal Fast-Test reproduction script                     │
+│  • Verify fix with: ISENGARD_MODE=fast-test pytest -v                  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Per-Job Log Structure
+
+Every training job creates its own log directory:
+
+```
+logs/
+├── jobs/
+│   └── {job_id}/
+│       ├── events.jsonl          # Main structured event log
+│       └── samples/              # Sample images generated during training
+│           ├── step_100.png
+│           ├── step_200.png
+│           └── ...
+└── bundles/
+    └── {job_id}_debug.zip        # Debug bundle (on-demand)
+```
+
+### events.jsonl Schema
+
+Each line in events.jsonl is a JSON object:
+
+```json
+{
+  "ts": "2025-01-28T10:30:00.000Z",
+  "level": "INFO",
+  "service": "api",
+  "job_id": "train-abc123",
+  "correlation_id": "req-xyz789",
+  "event": "training.step",
+  "msg": "Training step 100/1000",
+  "fields": {
+    "step": 100,
+    "loss": 0.0523,
+    "lr": 0.0001,
+    "eta_seconds": 3600
+  }
+}
+```
+
+**Key Event Types:**
+
+| Event | Description |
+|-------|-------------|
+| `training.start` | Job began, includes config summary |
+| `training.step` | Progress update with loss/lr/step |
+| `training.sample` | Sample image generated |
+| `training.complete` | Job finished successfully |
+| `training.failed` | Job failed with error details |
+| `subprocess.stdout` | Raw trainer subprocess output |
+| `subprocess.stderr` | Raw trainer subprocess errors |
+
+### Debug Bundle Generation
+
+Create a comprehensive debug package for any job:
+
+```bash
+# Via CLI
+python scripts/debug_bundle.py train-abc123
+
+# Via CLI with custom output path
+python scripts/debug_bundle.py train-abc123 --output /tmp/debug.zip
+
+# Via CLI showing first error
+python scripts/debug_bundle.py train-abc123 --show-error
+
+# Via API (download ZIP)
+curl -O http://localhost:8000/api/jobs/train-abc123/debug-bundle
+```
+
+**Bundle Contents:**
+
+```
+train-abc123_debug.zip
+└── train-abc123/
+    ├── README.txt           # Quick reference guide
+    ├── metadata.json        # Job configuration (secrets redacted)
+    ├── events.jsonl         # Full event log (secrets redacted)
+    ├── environment.json     # Runtime environment snapshot
+    ├── service_logs/
+    │   ├── api.log          # Last 1000 lines from API
+    │   └── worker.log       # Last 1000 lines from Worker
+    └── samples/
+        ├── step_100.png     # Sample images
+        └── step_200.png
+```
+
+### API Endpoints for Debugging
+
+| Endpoint | Purpose | Example |
+|----------|---------|---------|
+| `GET /api/jobs/{id}/logs` | Download full events.jsonl | `curl -O .../logs` |
+| `GET /api/jobs/{id}/logs/view` | View logs with filtering | `?level=ERROR&limit=50` |
+| `GET /api/jobs/{id}/stream` | SSE live progress stream | EventSource in browser |
+| `GET /api/jobs/{id}/artifacts` | List all job artifacts | Returns JSON array |
+| `GET /api/jobs/{id}/artifacts/samples/{file}` | Download sample image | `step_100.png` |
+| `GET /api/jobs/{id}/debug-bundle` | Download ZIP bundle | For offline analysis |
+| `GET /api/jobs/{id}/summary` | Quick status check | progress, status, last error |
+
+### Fast-Test Mode Validation
+
+Before deploying fixes, validate in Fast-Test mode:
+
+```bash
+# Run full observability test suite
+ISENGARD_MODE=fast-test pytest tests/test_training_observability.py -v
+
+# Test specific scenarios
+pytest tests/test_training_observability.py::TestLogRedaction -v
+pytest tests/test_training_observability.py::TestTrainingProgressEvent -v
+pytest tests/test_training_observability.py::TestEventBus -v
+pytest tests/test_training_observability.py::TestTrainingJobLogger -v
+pytest tests/test_training_observability.py::TestMockPluginSampleGeneration -v
+```
+
+### Common Debugging Scenarios
+
+#### Scenario: Training never starts
+
+```bash
+# 1. Check if job was created
+curl http://localhost:8000/api/jobs/train-xxx/summary
+
+# 2. Check API logs for queue errors
+grep "train-xxx" logs/api/latest/api.log | jq .
+
+# 3. Check worker is running and consuming
+grep "job.start" logs/worker/latest/worker.log | tail -10
+```
+
+#### Scenario: Training fails mid-run
+
+```bash
+# 1. Get events around failure
+curl "http://localhost:8000/api/jobs/train-xxx/logs/view?level=ERROR"
+
+# 2. Check for subprocess errors
+grep "subprocess" logs/jobs/train-xxx/events.jsonl | jq .
+
+# 3. Generate debug bundle for full context
+python scripts/debug_bundle.py train-xxx --show-error
+```
+
+#### Scenario: Samples not appearing in UI
+
+```bash
+# 1. Check if samples were generated
+ls logs/jobs/train-xxx/samples/
+
+# 2. Check sample events in log
+grep "training.sample" logs/jobs/train-xxx/events.jsonl | jq .
+
+# 3. Verify artifact endpoint
+curl http://localhost:8000/api/jobs/train-xxx/artifacts
+```
+
+#### Scenario: SSE stream not updating
+
+```bash
+# 1. Check EventBus is publishing
+grep "event_bus.publish" logs/api/latest/api.log | tail -20
+
+# 2. Verify SSE endpoint responds
+curl -N http://localhost:8000/api/jobs/train-xxx/stream
+
+# 3. Check for subscription errors
+grep "subscribe" logs/api/latest/api.log | jq .
+```
+
+### Debugging Checklist for Claude Code
+
+When debugging any training issue, verify:
+
+- [ ] `job_id` identified from error message or logs
+- [ ] `correlation_id` traced through all services
+- [ ] Per-job `events.jsonl` located and examined
+- [ ] First ERROR event timestamp noted
+- [ ] Root cause identified with log evidence
+- [ ] Fix proposed and tested in Fast-Test mode
+- [ ] Regression test added or reproduction documented
+
+---
+
 ## Development Workflow
 
 ### Local Run (One Command)
@@ -557,6 +948,137 @@ docker-compose exec web npm test
 
 # Check capabilities
 python -c "from packages.shared.src.capabilities import CAPABILITIES; print(CAPABILITIES)"
+```
+
+---
+
+## UI Flows (Current)
+
+### Frontend Routes
+
+| Route | Page | Description |
+|-------|------|-------------|
+| `/` | Redirect | Redirects to `/characters` |
+| `/characters` | Characters | Character CRUD, image upload/view/delete |
+| `/dataset` | Dataset Manager | Global image browser with filters and bulk actions |
+| `/training` | Training | LoRA training configuration and job monitoring |
+| `/generate` | Image Generation | Prompt-based generation with advanced toggles |
+| `/video` | Video | Scaffold only (Coming Soon) |
+
+### Character Management Flow
+
+```
+Create Character → Upload Images → View/Manage Images → Start Training
+     ↓                 ↓                 ↓                   ↓
+POST /characters  POST /images    GET/DELETE /images   POST /training
+```
+
+### Image Generation Flow
+
+```
+Select Aspect Ratio → Configure Toggles → Enter Prompt → Generate
+        ↓                    ↓                 ↓            ↓
+  Update W×H         use_controlnet      prompt text   POST /generation
+                     use_ipadapter
+                     use_facedetailer
+                     use_upscale
+```
+
+---
+
+## API Contracts (Current)
+
+### Character Endpoints
+
+```
+GET  /api/characters                    → List all characters
+POST /api/characters                    → Create character
+GET  /api/characters/{id}               → Get character
+PATCH /api/characters/{id}              → Update character
+DELETE /api/characters/{id}             → Delete character
+POST /api/characters/{id}/images        → Upload images (multipart)
+GET  /api/characters/{id}/images        → List images
+GET  /api/characters/{id}/images/{file} → Serve image file
+DELETE /api/characters/{id}/images/{file} → Delete image
+```
+
+### Training Endpoints
+
+```
+POST /api/training                      → Start training job
+GET  /api/training                      → List jobs
+GET  /api/training/{id}                 → Get job status
+GET  /api/training/{id}/stream          → SSE progress stream
+POST /api/training/{id}/cancel          → Cancel job
+```
+
+### Generation Endpoints
+
+```
+POST /api/generation                    → Start generation job
+GET  /api/generation                    → List jobs
+GET  /api/generation/{id}               → Get job status
+GET  /api/generation/{id}/stream        → SSE progress stream
+POST /api/generation/{id}/cancel        → Cancel job
+```
+
+### Generation Request Schema
+
+```typescript
+interface GenerationConfig {
+  prompt: string
+  negative_prompt: string
+  width: number          // 512-2048
+  height: number         // 512-2048
+  steps: number          // 1-100
+  guidance_scale: number // 1-20
+  seed: number | null
+  lora_id: string | null
+  lora_strength: number  // 0-1.5
+  // Advanced toggles
+  use_controlnet: boolean
+  use_ipadapter: boolean
+  use_facedetailer: boolean
+  use_upscale: boolean
+}
+```
+
+---
+
+## ComfyUI Workflow Architecture
+
+### FLUX Model Requirements
+
+FLUX models use a **disaggregated architecture** with separate components:
+
+| Component | Node Type | Model File |
+|-----------|-----------|------------|
+| UNET | `UNETLoader` | `flux1-dev.safetensors` or `flux1-schnell.safetensors` |
+| CLIP-L | `DualCLIPLoader` | `clip_l.safetensors` |
+| T5-XXL | `DualCLIPLoader` | `t5xxl_fp16.safetensors` |
+| VAE | `VAELoader` | `ae.safetensors` |
+
+### Workflow Files
+
+| Workflow | Use Case | Key Nodes |
+|----------|----------|-----------|
+| `flux-schnell.json` | Fast generation (4 steps) | UNETLoader, DualCLIPLoader, VAELoader |
+| `flux-dev.json` | Quality generation (20 steps) | Same as schnell |
+| `flux-schnell-lora.json` | Fast + LoRA | + LoraLoaderModelOnly |
+| `flux-dev-lora.json` | Quality + LoRA | + LoraLoaderModelOnly |
+
+### Template Processing
+
+Workflows use placeholder values that are replaced at runtime:
+
+```python
+# In comfyui.py _load_workflow()
+workflow_text = re.sub(r'{{WIDTH}}', '512', workflow_text)
+workflow_text = re.sub(r'{{HEIGHT}}', '512', workflow_text)
+# ... etc
+
+# In _inject_parameters()
+workflow_str = workflow_str.replace('"width": 512', f'"width": {config.width}')
 ```
 
 ---

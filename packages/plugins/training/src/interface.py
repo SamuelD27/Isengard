@@ -8,9 +8,33 @@ This provides a stable contract between the worker and training implementations.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Callable, Literal, TypedDict
 
 from packages.shared.src.types import TrainingConfig, TrainingMethod
+
+
+# ============================================
+# Capability Schema Types
+# ============================================
+
+class ParameterSchema(TypedDict, total=False):
+    """Schema for a single parameter."""
+    type: Literal["int", "float", "enum", "bool", "string"]
+    min: float | int | None
+    max: float | int | None
+    step: float | None  # UI hint for input step size
+    options: list[str | int | float] | None  # For enum type
+    default: any
+    wired: bool  # True if backend actually uses this parameter
+    reason: str | None  # Why unavailable (if wired=False)
+    description: str | None
+
+
+class TrainingCapabilities(TypedDict):
+    """Capabilities reported by a training plugin."""
+    method: str  # e.g., "lora"
+    backend: str  # e.g., "ai-toolkit"
+    parameters: dict[str, ParameterSchema]
 
 
 @dataclass
@@ -22,6 +46,8 @@ class TrainingProgress:
     learning_rate: float | None = None
     message: str = ""
     preview_path: str | None = None
+    sample_path: str | None = None  # Path to newly generated sample image
+    eta_seconds: int | None = None  # Estimated time remaining
 
     @property
     def percentage(self) -> float:
@@ -39,6 +65,7 @@ class TrainingResult:
     total_steps: int = 0
     final_loss: float | None = None
     training_time_seconds: float = 0.0
+    samples: list[str] | None = None  # Paths to generated sample images
 
 
 class TrainingPlugin(ABC):
@@ -51,6 +78,7 @@ class TrainingPlugin(ABC):
     3. Write output to the specified path
     4. Handle cancellation gracefully
     5. Clean up resources on completion
+    6. Report capabilities via get_capabilities()
     """
 
     @property
@@ -63,6 +91,21 @@ class TrainingPlugin(ABC):
     @abstractmethod
     def supported_methods(self) -> list[TrainingMethod]:
         """List of training methods this plugin supports."""
+        pass
+
+    @abstractmethod
+    def get_capabilities(self) -> TrainingCapabilities:
+        """
+        Return the capabilities and supported parameters for this plugin.
+
+        This schema is used by:
+        - API /info endpoint to advertise capabilities
+        - Frontend to render dynamic controls
+        - API validation to reject unsupported parameters
+
+        Returns:
+            TrainingCapabilities with method, backend, and parameter schemas
+        """
         pass
 
     @abstractmethod

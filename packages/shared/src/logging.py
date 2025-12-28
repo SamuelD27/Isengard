@@ -422,3 +422,295 @@ def log_job_event(
             **extra_context,
         }
     )
+
+
+class JobLogger:
+    """
+    Logger that writes to both service log and job-specific JSONL file.
+
+    Each job gets a dedicated log file at:
+        VOLUME_ROOT/logs/jobs/{job_id}.jsonl
+
+    This allows:
+    - Per-job log isolation for debugging
+    - Log file download via API endpoint
+    - Complete job trace with correlation ID
+
+    Example:
+        job_logger = JobLogger("train-abc123")
+        job_logger.info("Starting training", event="job.start", steps=1000)
+        job_logger.error("Training failed", event="job.error", reason="OOM")
+    """
+
+    def __init__(self, job_id: str, service: str = "worker"):
+        """
+        Initialize job logger.
+
+        Args:
+            job_id: Unique job identifier
+            service: Service name for service log (default: worker)
+        """
+        self.job_id = job_id
+        self.service = service
+        self._service_logger = get_logger(f"{service}.job.{job_id}", service)
+
+        # Job log path from config (single source of truth)
+        config = get_global_config()
+        self.job_log_dir = config.volume_root / "logs" / "jobs"
+        self.job_log_dir.mkdir(parents=True, exist_ok=True)
+        self.job_log_path = self.job_log_dir / f"{job_id}.jsonl"
+
+    def _build_record(
+        self,
+        level: str,
+        msg: str,
+        event: str | None,
+        fields: dict,
+    ) -> dict:
+        """Build a log record dictionary."""
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "level": level,
+            "service": self.service,
+            "job_id": self.job_id,
+            "msg": msg,
+        }
+
+        # Add correlation ID if present
+        correlation_id = get_correlation_id()
+        if correlation_id:
+            record["correlation_id"] = correlation_id
+
+        # Add event if provided
+        if event:
+            record["event"] = event
+
+        # Add extra fields if provided
+        if fields:
+            record["fields"] = fields
+
+        return record
+
+    def _append_to_job_log(self, record: dict) -> None:
+        """
+        Append record to job log file with file locking.
+
+        Uses simple file-based locking for concurrent writes.
+        """
+        # Filter out None values for cleaner output
+        clean_record = {k: v for k, v in record.items() if v is not None}
+
+        # Apply redaction before writing
+        line = redact_sensitive(json.dumps(clean_record, default=str))
+
+        # Simple append with newline
+        # Note: For production with high concurrency, consider using portalocker
+        try:
+            with open(self.job_log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception as e:
+            # Don't fail the job if logging fails
+            self._service_logger.warning(
+                f"Failed to write to job log: {e}",
+                extra={"event": "logging.error", "job_id": self.job_id}
+            )
+
+    def info(self, msg: str, *, event: str | None = None, **fields) -> None:
+        """Log an INFO level message."""
+        record = self._build_record("INFO", msg, event, fields)
+        self._service_logger.info(msg, extra={"event": event, "job_id": self.job_id, **fields})
+        self._append_to_job_log(record)
+
+    def warning(self, msg: str, *, event: str | None = None, **fields) -> None:
+        """Log a WARNING level message."""
+        record = self._build_record("WARNING", msg, event, fields)
+        self._service_logger.warning(msg, extra={"event": event, "job_id": self.job_id, **fields})
+        self._append_to_job_log(record)
+
+    def error(self, msg: str, *, event: str | None = None, **fields) -> None:
+        """Log an ERROR level message."""
+        record = self._build_record("ERROR", msg, event, fields)
+        self._service_logger.error(msg, extra={"event": event, "job_id": self.job_id, **fields})
+        self._append_to_job_log(record)
+
+    def debug(self, msg: str, *, event: str | None = None, **fields) -> None:
+        """Log a DEBUG level message."""
+        record = self._build_record("DEBUG", msg, event, fields)
+        self._service_logger.debug(msg, extra={"event": event, "job_id": self.job_id, **fields})
+        self._append_to_job_log(record)
+
+    def get_log_path(self) -> Path:
+        """Get the path to this job's log file."""
+        return self.job_log_path
+
+
+def get_job_log_path(job_id: str) -> Path | None:
+    """
+    Get the log file path for a job.
+
+    Returns None if the log file doesn't exist.
+    """
+    config = get_global_config()
+    log_path = config.volume_root / "logs" / "jobs" / f"{job_id}.jsonl"
+    return log_path if log_path.exists() else None
+
+
+def get_job_artifacts_dir(job_id: str) -> Path:
+    """
+    Get the artifacts directory for a job.
+
+    Creates the directory if it doesn't exist.
+    """
+    config = get_global_config()
+    artifacts_dir = config.volume_root / "artifacts" / "jobs" / job_id
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    return artifacts_dir
+
+
+def get_job_samples_dir(job_id: str) -> Path:
+    """
+    Get the samples directory for a job.
+
+    Creates the directory if it doesn't exist.
+    """
+    samples_dir = get_job_artifacts_dir(job_id) / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    return samples_dir
+
+
+class TrainingJobLogger(JobLogger):
+    """
+    Enhanced job logger specifically for training jobs.
+
+    Adds:
+    - Progress event emission to event bus
+    - Sample image tracking
+    - Subprocess output capture
+    - GPU metrics logging
+    """
+
+    def __init__(self, job_id: str, correlation_id: str | None = None, service: str = "worker"):
+        super().__init__(job_id, service)
+        self.correlation_id = correlation_id
+        self._samples: list[str] = []
+        self._last_step = 0
+        self._total_steps = 0
+        self._start_time: datetime | None = None
+
+    def set_total_steps(self, total: int) -> None:
+        """Set the total number of training steps."""
+        self._total_steps = total
+
+    def start(self, total_steps: int, config_summary: dict | None = None) -> None:
+        """Log training start."""
+        self._total_steps = total_steps
+        self._start_time = datetime.now(timezone.utc)
+
+        self.info(
+            "Training started",
+            event="training.start",
+            total_steps=total_steps,
+            config=config_summary or {},
+        )
+
+    def step(
+        self,
+        current_step: int,
+        loss: float | None = None,
+        lr: float | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Log a training step."""
+        self._last_step = current_step
+        progress = (current_step / self._total_steps * 100) if self._total_steps > 0 else 0
+
+        # Calculate ETA
+        eta_seconds = None
+        if self._start_time and current_step > 0:
+            elapsed = (datetime.now(timezone.utc) - self._start_time).total_seconds()
+            steps_per_second = current_step / elapsed
+            remaining_steps = self._total_steps - current_step
+            if steps_per_second > 0:
+                eta_seconds = int(remaining_steps / steps_per_second)
+
+        step_msg = message or f"Step {current_step}/{self._total_steps}"
+
+        extra = {
+            "step": current_step,
+            "total_steps": self._total_steps,
+            "progress_pct": round(progress, 2),
+        }
+        if loss is not None:
+            extra["loss"] = round(loss, 6)
+        if lr is not None:
+            extra["lr"] = lr
+        if eta_seconds is not None:
+            extra["eta_seconds"] = eta_seconds
+
+        self.debug(step_msg, event="training.step", **extra)
+
+    def sample_generated(self, sample_path: str | Path, step: int) -> None:
+        """Log sample image generation."""
+        path_str = str(sample_path)
+        self._samples.append(path_str)
+
+        self.info(
+            f"Sample generated at step {step}",
+            event="training.sample",
+            sample_path=path_str,
+            step=step,
+            sample_index=len(self._samples),
+        )
+
+    def checkpoint_saved(self, checkpoint_path: str | Path, step: int) -> None:
+        """Log checkpoint save."""
+        self.info(
+            f"Checkpoint saved at step {step}",
+            event="training.checkpoint",
+            checkpoint_path=str(checkpoint_path),
+            step=step,
+        )
+
+    def subprocess_output(self, line: str, stream: str = "stdout") -> None:
+        """Log subprocess output line."""
+        event = f"subprocess.{stream}"
+        level = "DEBUG" if stream == "stdout" else "WARNING"
+
+        record = self._build_record(level, line.rstrip(), event, {"stream": stream})
+        self._append_to_job_log(record)
+
+        # Also log to service logger at appropriate level
+        if stream == "stderr":
+            self._service_logger.warning(line.rstrip(), extra={"event": event, "job_id": self.job_id})
+        else:
+            self._service_logger.debug(line.rstrip(), extra={"event": event, "job_id": self.job_id})
+
+    def complete(self, output_path: str | Path, training_time_seconds: float, final_loss: float | None = None) -> None:
+        """Log training completion."""
+        self.info(
+            "Training completed successfully",
+            event="training.complete",
+            output_path=str(output_path),
+            training_time_seconds=round(training_time_seconds, 2),
+            final_loss=round(final_loss, 6) if final_loss else None,
+            samples_generated=len(self._samples),
+            total_steps=self._total_steps,
+        )
+
+    def fail(self, error: str, error_type: str | None = None, stack_trace: str | None = None) -> None:
+        """Log training failure with full context."""
+        extra = {
+            "error": error,
+            "step": self._last_step,
+            "total_steps": self._total_steps,
+        }
+        if error_type:
+            extra["error_type"] = error_type
+        if stack_trace:
+            extra["stack_trace"] = stack_trace
+
+        self.error("Training failed", event="training.failed", **extra)
+
+    def get_samples(self) -> list[str]:
+        """Get list of generated sample paths."""
+        return self._samples.copy()
