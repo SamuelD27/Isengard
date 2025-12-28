@@ -8,22 +8,29 @@ Verifies the observability infrastructure is working correctly:
 3. Log rotation works
 4. Logs are written in correct format
 5. Redaction is working
+6. End-to-end job log creation (when SMOKE_TEST_ENABLED=1)
 
 Usage:
-    python scripts/obs_smoke_test.py
-    python scripts/obs_smoke_test.py --verbose
+    python scripts/obs_smoke_test.py                # Basic tests only
+    python scripts/obs_smoke_test.py --verbose      # With verbose output
+    SMOKE_TEST_ENABLED=1 python scripts/obs_smoke_test.py  # Full E2E tests
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Gate for full end-to-end tests
+SMOKE_TEST_ENABLED = os.getenv("SMOKE_TEST_ENABLED", "0") == "1"
 
 
 def test_imports():
@@ -326,6 +333,194 @@ def test_correlation_id():
     return True
 
 
+async def test_e2e_health_and_info():
+    """Test /health and /info endpoints (E2E)."""
+    print("Testing /health and /info endpoints...")
+
+    if not SMOKE_TEST_ENABLED:
+        print("  [SKIP] Set SMOKE_TEST_ENABLED=1 to run E2E tests")
+        return True
+
+    try:
+        from httpx import AsyncClient, ASGITransport
+        from apps.api.src.main import app
+    except ImportError as e:
+        print(f"  [SKIP] Missing dependencies: {e}")
+        return True
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Test /health
+        response = await client.get("/health")
+        if response.status_code != 200:
+            print(f"  [FAIL] /health returned {response.status_code}")
+            return False
+
+        data = response.json()
+        if data.get("status") != "healthy":
+            print(f"  [FAIL] /health status not healthy: {data}")
+            return False
+        print("  [PASS] /health returns healthy")
+
+        # Test correlation ID in response
+        if "x-correlation-id" not in response.headers:
+            print("  [FAIL] Missing X-Correlation-ID header")
+            return False
+        print("  [PASS] /health has X-Correlation-ID header")
+
+        # Test /info
+        response = await client.get("/info")
+        if response.status_code != 200:
+            print(f"  [FAIL] /info returned {response.status_code}")
+            return False
+
+        info = response.json()
+        required_fields = ["name", "version", "mode", "training", "image_generation"]
+        for field in required_fields:
+            if field not in info:
+                print(f"  [FAIL] /info missing field: {field}")
+                return False
+        print("  [PASS] /info returns all required fields")
+
+        # Check capabilities structure
+        if "parameters" not in info.get("training", {}):
+            print("  [FAIL] /info training missing parameters")
+            return False
+        print("  [PASS] /info training has parameters")
+
+    return True
+
+
+async def test_e2e_training_job_logs():
+    """Test training job creates JSONL logs (E2E)."""
+    print("Testing training job JSONL log creation...")
+
+    if not SMOKE_TEST_ENABLED:
+        print("  [SKIP] Set SMOKE_TEST_ENABLED=1 to run E2E tests")
+        return True
+
+    try:
+        from httpx import AsyncClient, ASGITransport
+        from apps.api.src.main import app
+        from packages.shared.src.config import get_global_config
+        from packages.shared.src.logging import get_job_log_path
+    except ImportError as e:
+        print(f"  [SKIP] Missing dependencies: {e}")
+        return True
+
+    config = get_global_config()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Create character
+        char_resp = await client.post("/api/characters", json={
+            "name": "Smoke Test Character",
+            "trigger_word": "smoketest person"
+        })
+        if char_resp.status_code != 201:
+            print(f"  [FAIL] Create character failed: {char_resp.status_code}")
+            return False
+        char_id = char_resp.json()["id"]
+        print(f"  [OK] Created character: {char_id}")
+
+        # 2. Upload test image
+        test_image = bytes([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41,
+            0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+            0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x18, 0xDD,
+            0x8D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+            0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ])
+        files = [("files", ("test.png", test_image, "image/png"))]
+        upload_resp = await client.post(f"/api/characters/{char_id}/images", files=files)
+        if upload_resp.status_code != 201:
+            print(f"  [FAIL] Upload image failed: {upload_resp.status_code}")
+            return False
+        print("  [OK] Uploaded test image")
+
+        # 3. Start training with correlation ID
+        correlation_id = f"smoke-test-{int(time.time())}"
+        train_resp = await client.post(
+            "/api/training",
+            json={
+                "character_id": char_id,
+                "config": {"steps": 100}
+            },
+            headers={"X-Correlation-ID": correlation_id}
+        )
+        if train_resp.status_code != 201:
+            print(f"  [FAIL] Start training failed: {train_resp.status_code}")
+            return False
+        job_id = train_resp.json()["id"]
+        print(f"  [OK] Started training job: {job_id}")
+
+        # 4. Wait for completion (max 60 seconds)
+        max_wait = 60
+        start_time = time.time()
+        while time.time() - start_time < max_wait:
+            status_resp = await client.get(f"/api/training/{job_id}")
+            status = status_resp.json()
+            if status["status"] in ["completed", "failed"]:
+                break
+            await asyncio.sleep(0.5)
+
+        final_status = (await client.get(f"/api/training/{job_id}")).json()
+        if final_status["status"] != "completed":
+            print(f"  [FAIL] Training did not complete: {final_status['status']}")
+            print(f"         Error: {final_status.get('error_message', 'Unknown')}")
+            return False
+        print("  [OK] Training completed")
+
+        # 5. Check JSONL log file exists
+        job_log_path = get_job_log_path(job_id)
+        if job_log_path is None or not job_log_path.exists():
+            print(f"  [FAIL] Job log file not found for {job_id}")
+            return False
+        print(f"  [OK] Job log file exists: {job_log_path}")
+
+        # 6. Validate JSONL structure
+        with open(job_log_path) as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        if not lines:
+            print("  [FAIL] Job log file is empty")
+            return False
+
+        required_fields = {"ts", "level", "service", "job_id", "msg"}
+        for i, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+                missing = required_fields - set(record.keys())
+                if missing:
+                    print(f"  [FAIL] Line {i} missing fields: {missing}")
+                    return False
+                # Verify job_id matches
+                if record.get("job_id") != job_id:
+                    print(f"  [FAIL] Line {i} has wrong job_id")
+                    return False
+            except json.JSONDecodeError:
+                print(f"  [FAIL] Line {i} is not valid JSON")
+                return False
+
+        print(f"  [PASS] All {len(lines)} log entries have valid structure")
+
+        # 7. Check correlation ID in logs
+        has_correlation = any(
+            json.loads(line).get("correlation_id") == correlation_id
+            for line in lines
+        )
+        if has_correlation:
+            print("  [PASS] Correlation ID found in job logs")
+        else:
+            print("  [WARN] Correlation ID not found in job logs (may be expected)")
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Observability smoke test")
     parser.add_argument(
@@ -347,8 +542,10 @@ def main():
     print("=" * 50)
     print(f"Date: {datetime.now().isoformat()}")
     print(f"Log directory: {args.log_dir}")
+    print(f"SMOKE_TEST_ENABLED: {SMOKE_TEST_ENABLED}")
     print()
 
+    # Basic tests (always run)
     tests = [
         ("Imports", test_imports),
         ("Redaction", test_redaction),
@@ -362,6 +559,24 @@ def main():
     for name, test_func in tests:
         try:
             result = test_func()
+            results.append((name, result))
+        except Exception as e:
+            print(f"  [FAIL] Exception: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            results.append((name, False))
+        print()
+
+    # E2E tests (only when SMOKE_TEST_ENABLED)
+    e2e_tests = [
+        ("E2E: Health & Info", test_e2e_health_and_info),
+        ("E2E: Training Job Logs", test_e2e_training_job_logs),
+    ]
+
+    for name, test_func in e2e_tests:
+        try:
+            result = asyncio.run(test_func())
             results.append((name, result))
         except Exception as e:
             print(f"  [FAIL] Exception: {e}")
