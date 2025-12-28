@@ -12,6 +12,7 @@ Requires:
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -23,7 +24,7 @@ from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import get_logger
 from packages.shared.src.types import GenerationConfig
 
-from .interface import ImagePlugin, GenerationProgress, GenerationResult
+from .interface import ImagePlugin, GenerationProgress, GenerationResult, ImageCapabilities
 
 logger = get_logger("plugins.image.comfyui")
 
@@ -66,6 +67,100 @@ class ComfyUIPlugin(ImagePlugin):
     @property
     def name(self) -> str:
         return "comfyui"
+
+    def get_capabilities(self) -> ImageCapabilities:
+        """
+        Return ComfyUI image generation capabilities.
+
+        Toggles reflect which workflow variants are currently implemented.
+        Parameters describe supported generation options.
+        """
+        return {
+            "backend": "comfyui",
+            "model_variants": ["flux-dev", "flux-schnell"],
+            "toggles": {
+                "use_upscale": {
+                    "supported": True,
+                    "description": "2x upscale with RealESRGAN",
+                },
+                "use_facedetailer": {
+                    "supported": False,
+                    "reason": "Workflow not implemented",
+                    "description": "Face enhancement with FaceDetailer",
+                },
+                "use_ipadapter": {
+                    "supported": False,
+                    "reason": "Workflow not implemented",
+                    "description": "Style transfer with IP-Adapter",
+                },
+                "use_controlnet": {
+                    "supported": False,
+                    "reason": "Workflow not implemented",
+                    "description": "Pose/structure guidance with ControlNet",
+                },
+            },
+            "parameters": {
+                "width": {
+                    "type": "int",
+                    "min": 512,
+                    "max": 2048,
+                    "step": 64,
+                    "default": 1024,
+                    "wired": True,
+                    "description": "Output image width",
+                },
+                "height": {
+                    "type": "int",
+                    "min": 512,
+                    "max": 2048,
+                    "step": 64,
+                    "default": 1024,
+                    "wired": True,
+                    "description": "Output image height",
+                },
+                "steps": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 100,
+                    "default": 20,
+                    "wired": True,
+                    "description": "Number of sampling steps",
+                },
+                "guidance_scale": {
+                    "type": "float",
+                    "min": 1.0,
+                    "max": 20.0,
+                    "step": 0.5,
+                    "default": 3.5,
+                    "wired": True,
+                    "description": "Classifier-free guidance scale",
+                },
+                "seed": {
+                    "type": "int",
+                    "min": 0,
+                    "max": 2147483647,
+                    "default": 0,
+                    "wired": True,
+                    "description": "Random seed (0 for random)",
+                },
+                "lora_strength": {
+                    "type": "float",
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "default": 1.0,
+                    "wired": True,
+                    "description": "LoRA model strength",
+                },
+                "model_variant": {
+                    "type": "enum",
+                    "options": ["flux-dev", "flux-schnell"],
+                    "default": "flux-dev",
+                    "wired": True,
+                    "description": "Base model to use",
+                },
+            },
+        }
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -301,7 +396,22 @@ class ComfyUIPlugin(ImagePlugin):
 
         try:
             with open(workflow_path) as f:
-                workflow = json.load(f)
+                workflow_text = f.read()
+            
+            # Pre-process template markers to valid JSON placeholders before parsing
+            # Replace numeric placeholders with valid JSON numbers
+            workflow_text = re.sub(r'\{\{WIDTH\}\}', '512', workflow_text)
+            workflow_text = re.sub(r'\{\{HEIGHT\}\}', '512', workflow_text)
+            workflow_text = re.sub(r'\{\{SEED\}\}', '0', workflow_text)
+            workflow_text = re.sub(r'\{\{STEPS\}\}', '20', workflow_text)
+            workflow_text = re.sub(r'\{\{CFG\}\}', '3.5', workflow_text)
+            workflow_text = re.sub(r'\{\{LORA_STRENGTH\}\}', '1.0', workflow_text)
+            # String placeholders are already in quotes, just use placeholder text
+            workflow_text = re.sub(r'\{\{PROMPT\}\}', '__PROMPT_PLACEHOLDER__', workflow_text)
+            workflow_text = re.sub(r'\{\{NEGATIVE_PROMPT\}\}', '__NEGATIVE_PROMPT_PLACEHOLDER__', workflow_text)
+            workflow_text = re.sub(r'\{\{LORA_PATH\}\}', '__LORA_PATH_PLACEHOLDER__', workflow_text)
+            
+            workflow = json.loads(workflow_text)
             logger.debug(f"Loaded workflow: {workflow_path.name} from {workflow_path.parent}")
             return workflow
         except json.JSONDecodeError as e:
@@ -323,33 +433,30 @@ class ComfyUIPlugin(ImagePlugin):
         # Convert to string for simple replacement
         workflow_str = json.dumps(workflow)
 
-        # Replace markers
-        replacements = {
-            PROMPT_MARKER: config.prompt,
-            NEGATIVE_PROMPT_MARKER: config.negative_prompt or "",
-            SEED_MARKER: str(seed),
-            WIDTH_MARKER: str(config.width),
-            HEIGHT_MARKER: str(config.height),
-            STEPS_MARKER: str(config.steps or 20),
-            CFG_MARKER: str(config.cfg_scale or 3.5),
-        }
-
-        for marker, value in replacements.items():
-            # Escape for JSON
-            escaped_value = json.dumps(value)[1:-1]  # Remove quotes
-            workflow_str = workflow_str.replace(marker, escaped_value)
-
-        # Handle LoRA injection
-        if lora_path and LORA_PATH_MARKER in workflow_str:
-            workflow_str = workflow_str.replace(LORA_PATH_MARKER, str(lora_path))
-            workflow_str = workflow_str.replace(
-                LORA_STRENGTH_MARKER,
-                str(config.lora_strength or 1.0)
-            )
-        elif LORA_PATH_MARKER in workflow_str:
-            # Remove LoRA node if no LoRA provided (set to empty/skip)
-            workflow_str = workflow_str.replace(LORA_PATH_MARKER, "")
-            workflow_str = workflow_str.replace(LORA_STRENGTH_MARKER, "0")
+        # Handle numeric fields - replace default values with actual config values
+        workflow_str = workflow_str.replace('"width": 512', f'"width": {config.width}')
+        workflow_str = workflow_str.replace('"height": 512', f'"height": {config.height}')
+        workflow_str = workflow_str.replace('"seed": 0', f'"seed": {seed}')
+        workflow_str = workflow_str.replace('"steps": 20', f'"steps": {config.steps or 20}')
+        workflow_str = workflow_str.replace('"steps": 4', f'"steps": {config.steps or 4}')  # flux-schnell uses 4 steps
+        workflow_str = workflow_str.replace('"cfg": 3.5', f'"cfg": {config.guidance_scale or 3.5}')
+        workflow_str = workflow_str.replace('"cfg": 1.0', f'"cfg": {config.guidance_scale or 1.0}')  # flux-schnell uses 1.0
+        workflow_str = workflow_str.replace('"guidance": 3.5', f'"guidance": {config.guidance_scale or 3.5}')
+        
+        # Replace string placeholders for prompts
+        escaped_prompt = json.dumps(config.prompt)[1:-1]  # Remove quotes and escape
+        escaped_neg_prompt = json.dumps(config.negative_prompt or "")[1:-1]
+        
+        workflow_str = workflow_str.replace('__PROMPT_PLACEHOLDER__', escaped_prompt)
+        workflow_str = workflow_str.replace('__NEGATIVE_PROMPT_PLACEHOLDER__', escaped_neg_prompt)
+        
+        # Handle LoRA path placeholder
+        if lora_path:
+            workflow_str = workflow_str.replace('__LORA_PATH_PLACEHOLDER__', str(lora_path))
+            workflow_str = workflow_str.replace('"strength_model": 1.0', f'"strength_model": {config.lora_strength or 1.0}')
+            workflow_str = workflow_str.replace('"strength_clip": 1.0', f'"strength_clip": {config.lora_strength or 1.0}')
+        else:
+            workflow_str = workflow_str.replace('__LORA_PATH_PLACEHOLDER__', '')
 
         return json.loads(workflow_str)
 

@@ -6,14 +6,6 @@
       "weight_dtype": "default"
     }
   },
-  "14": {
-    "class_type": "LoraLoaderModelOnly",
-    "inputs": {
-      "lora_name": "__LORA_PATH_PLACEHOLDER__",
-      "strength_model": 1.0,
-      "model": ["4", 0]
-    }
-  },
   "11": {
     "class_type": "DualCLIPLoader",
     "inputs": {
@@ -61,7 +53,7 @@
       "sampler_name": "euler",
       "scheduler": "simple",
       "denoise": 1.0,
-      "model": ["14", 0],
+      "model": ["4", 0],
       "positive": ["13", 0],
       "negative": ["13", 0],
       "latent_image": ["5", 0]
@@ -74,11 +66,30 @@
       "vae": ["12", 0]
     }
   },
+  "20": {
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "Load RealESRGAN 2x Upscale Model"
+    },
+    "inputs": {
+      "model_name": "RealESRGAN_x2plus.pth"
+    }
+  },
+  "21": {
+    "class_type": "ImageUpscaleWithModel",
+    "_meta": {
+      "title": "2x Upscale with RealESRGAN"
+    },
+    "inputs": {
+      "upscale_model": ["20", 0],
+      "image": ["8", 0]
+    }
+  },
   "9": {
     "class_type": "SaveImage",
     "inputs": {
       "filename_prefix": "isengard_output",
-      "images": ["8", 0]
+      "images": ["21", 0]
     }
   }
 }

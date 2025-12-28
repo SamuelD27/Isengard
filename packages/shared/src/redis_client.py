@@ -247,7 +247,10 @@ async def list_jobs(job_type: str | None = None, limit: int = 100) -> list[dict]
     for job_id in list(index.keys())[:limit]:
         job_data = await get_job(job_id)
         if job_data:
-            if job_type is None or job_data.get("type") == job_type:
+            # Infer type from job_id prefix if not stored
+            inferred_type = "training" if job_id.startswith("train-") else "generation" if job_id.startswith("gen-") else None
+            actual_type = job_data.get("type", inferred_type)
+            if job_type is None or actual_type == job_type:
                 jobs.append(job_data)
 
     return sorted(jobs, key=lambda x: x.get("created_at", ""), reverse=True)

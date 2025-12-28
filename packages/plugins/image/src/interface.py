@@ -7,9 +7,41 @@ All image generation backends must implement this interface.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal, TypedDict
 
 from packages.shared.src.types import GenerationConfig
+
+
+# ============================================
+# Capability Schema Types
+# ============================================
+
+class ParameterSchema(TypedDict, total=False):
+    """Schema for a single parameter."""
+    type: Literal["int", "float", "enum", "bool", "string"]
+    min: float | int | None
+    max: float | int | None
+    step: float | None  # UI hint for input step size
+    options: list[str | int | float] | None  # For enum type
+    default: any
+    wired: bool  # True if backend actually uses this parameter
+    reason: str | None  # Why unavailable (if wired=False)
+    description: str | None
+
+
+class ToggleSchema(TypedDict, total=False):
+    """Schema for a toggle feature."""
+    supported: bool
+    reason: str | None  # Why not supported
+    description: str | None
+
+
+class ImageCapabilities(TypedDict):
+    """Capabilities reported by an image generation plugin."""
+    backend: str  # e.g., "comfyui"
+    model_variants: list[str]  # e.g., ["flux-dev", "flux-schnell"]
+    toggles: dict[str, ToggleSchema]  # Feature toggles
+    parameters: dict[str, ParameterSchema]
 
 
 @dataclass
@@ -46,12 +78,28 @@ class ImagePlugin(ABC):
     2. Emit progress updates via the callback
     3. Write output images to specified paths
     4. Handle LoRA loading when lora_id is provided
+    5. Report capabilities via get_capabilities()
     """
 
     @property
     @abstractmethod
     def name(self) -> str:
         """Plugin identifier (e.g., 'comfyui')."""
+        pass
+
+    @abstractmethod
+    def get_capabilities(self) -> ImageCapabilities:
+        """
+        Return the capabilities and supported parameters for this plugin.
+
+        This schema is used by:
+        - API /info endpoint to advertise capabilities
+        - Frontend to render dynamic controls
+        - API validation to reject unsupported parameters
+
+        Returns:
+            ImageCapabilities with backend, toggles, and parameter schemas
+        """
         pass
 
     @abstractmethod

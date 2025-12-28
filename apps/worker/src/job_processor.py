@@ -205,6 +205,15 @@ class JobProcessor:
         # Progress callback with Redis publishing
         async def on_progress(progress):
             percentage = (progress.current_step / total_steps) * 100 if total_steps > 0 else 0
+            # Update job record so polling gets latest progress
+            await redis_client.update_job_status(
+                job_id=job_id,
+                status="running",
+                progress=percentage,
+                current_step=progress.current_step,
+                total_steps=total_steps,
+            )
+            # Also publish to stream for SSE listeners
             await redis_client.publish_progress(
                 job_id=job_id,
                 status="running",

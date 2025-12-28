@@ -12,7 +12,7 @@ from typing import Callable
 from packages.shared.src.logging import get_logger
 from packages.shared.src.types import GenerationConfig
 
-from .interface import ImagePlugin, GenerationProgress, GenerationResult
+from .interface import ImagePlugin, GenerationProgress, GenerationResult, ImageCapabilities
 
 logger = get_logger("plugins.image.mock")
 
@@ -47,6 +47,97 @@ class MockImagePlugin(ImagePlugin):
     @property
     def name(self) -> str:
         return "mock"
+
+    def get_capabilities(self) -> ImageCapabilities:
+        """
+        Return mock image generation capabilities.
+
+        Mirrors ComfyUI capabilities for consistent fast-test behavior.
+        All toggles marked as supported for full UI testing.
+        """
+        return {
+            "backend": "mock",
+            "model_variants": ["flux-dev", "flux-schnell"],
+            "toggles": {
+                "use_upscale": {
+                    "supported": True,
+                    "description": "2x upscale (simulated in mock mode)",
+                },
+                "use_facedetailer": {
+                    "supported": True,
+                    "description": "Face enhancement (simulated)",
+                },
+                "use_ipadapter": {
+                    "supported": True,
+                    "description": "Style transfer (simulated)",
+                },
+                "use_controlnet": {
+                    "supported": True,
+                    "description": "Pose guidance (simulated)",
+                },
+            },
+            "parameters": {
+                "width": {
+                    "type": "int",
+                    "min": 512,
+                    "max": 2048,
+                    "step": 64,
+                    "default": 1024,
+                    "wired": True,
+                    "description": "Output image width",
+                },
+                "height": {
+                    "type": "int",
+                    "min": 512,
+                    "max": 2048,
+                    "step": 64,
+                    "default": 1024,
+                    "wired": True,
+                    "description": "Output image height",
+                },
+                "steps": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 100,
+                    "default": 20,
+                    "wired": True,
+                    "description": "Number of sampling steps",
+                },
+                "guidance_scale": {
+                    "type": "float",
+                    "min": 1.0,
+                    "max": 20.0,
+                    "step": 0.5,
+                    "default": 3.5,
+                    "wired": True,
+                    "description": "Classifier-free guidance scale",
+                },
+                "seed": {
+                    "type": "int",
+                    "min": 0,
+                    "max": 2147483647,
+                    "default": 0,
+                    "wired": True,
+                    "description": "Random seed (0 for random)",
+                },
+                "lora_strength": {
+                    "type": "float",
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.1,
+                    "default": 1.0,
+                    "wired": True,
+                    "description": "LoRA model strength",
+                },
+                "model_variant": {
+                    "type": "enum",
+                    "options": ["flux-dev", "flux-schnell"],
+                    "default": "flux-dev",
+                    "wired": True,
+                    "description": "Base model to use",
+                },
+            },
+        }
 
     async def check_health(self) -> tuple[bool, str | None]:
         """Always healthy in mock mode."""

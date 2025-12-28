@@ -2,7 +2,7 @@
   "4": {
     "class_type": "UNETLoader",
     "inputs": {
-      "unet_name": "flux1-dev.safetensors",
+      "unet_name": "flux1-schnell.safetensors",
       "weight_dtype": "default"
     }
   },
@@ -56,7 +56,7 @@
     "class_type": "KSampler",
     "inputs": {
       "seed": 0,
-      "steps": 20,
+      "steps": 4,
       "cfg": 1.0,
       "sampler_name": "euler",
       "scheduler": "simple",
