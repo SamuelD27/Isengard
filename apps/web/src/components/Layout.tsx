@@ -6,10 +6,12 @@ import {
   Zap,
   Image,
   Video,
+  Database,
   ChevronLeft,
   ChevronRight,
   Cpu,
   Activity,
+  ScrollText,
 } from 'lucide-react'
 
 interface LayoutProps {
@@ -22,6 +24,12 @@ const navItems = [
     label: 'Characters',
     icon: Users,
     description: 'Manage identities',
+  },
+  {
+    path: '/dataset',
+    label: 'Dataset',
+    icon: Database,
+    description: 'Manage images',
   },
   {
     path: '/training',
@@ -41,6 +49,12 @@ const navItems = [
     icon: Video,
     description: 'Coming soon',
     disabled: true,
+  },
+  {
+    path: '/logs',
+    label: 'Logs',
+    icon: ScrollText,
+    description: 'Interaction traces',
   },
 ]
 
