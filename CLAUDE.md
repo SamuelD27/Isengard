@@ -234,6 +234,53 @@ ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "find /app -name '*.py' -type f" | 
 - ❌ End a session with unsynced changes
 - ❌ Push a new Docker image without including all pod fixes
 
+### 10. Auto-Commit All Changes (Docker Image Sync) - CRITICAL
+
+> **Claude Code MUST commit all changes before the user deploys a new Docker image.**
+
+Docker images are built from the git repository. Any uncommitted changes will NOT be included in the image. This has caused deployment issues where the user sees "old" behavior because the fixes were never committed.
+
+#### Mandatory Behavior
+
+1. **Before ending any session** - Check `git status` for uncommitted changes
+2. **If changes exist** - Commit them with a descriptive message
+3. **Proactive commits** - Don't wait for user to ask; commit after completing work
+4. **Atomic commits** - Group related changes; separate unrelated work
+
+#### Commit Triggers
+
+Claude Code MUST commit when ANY of these occur:
+
+- ✅ Finishing a bug fix or feature
+- ✅ Modifying `start.sh`, `Dockerfile`, or deployment scripts
+- ✅ User mentions deploying, rebuilding, or pushing an image
+- ✅ User says they're "done for now" or ending the session
+- ✅ Switching to work on an unrelated task
+
+#### Commit Message Format
+
+```bash
+git add -A && git commit -m "$(cat <<'EOF'
+<type>: <short description>
+
+<optional body with details>
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+Types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `style`
+
+#### Red Flags (Never Do These)
+
+- ❌ Leave uncommitted changes when user mentions Docker/deployment
+- ❌ Assume user will commit later
+- ❌ Let a session end with `git status` showing modified files
+- ❌ Wait for user to explicitly ask for a commit
+
 ---
 
 ## Architecture Overview
