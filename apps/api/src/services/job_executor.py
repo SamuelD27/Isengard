@@ -218,12 +218,33 @@ async def execute_training_job(
 
         # Progress callback with event bus integration
         last_sample_path = None
+        last_step_time = start_time
+        last_step = 0
 
         async def emit_progress(progress: TrainingProgress) -> None:
-            nonlocal last_sample_path
+            nonlocal last_sample_path, last_step_time, last_step
+
+            # Calculate elapsed time
+            now = datetime.now(timezone.utc)
+            elapsed_seconds = int((now - start_time).total_seconds())
+
+            # Calculate iteration speed (steps per second)
+            iteration_speed = None
+            if progress.current_step > last_step:
+                step_delta = progress.current_step - last_step
+                time_delta = (now - last_step_time).total_seconds()
+                if time_delta > 0:
+                    iteration_speed = step_delta / time_delta
+                last_step = progress.current_step
+                last_step_time = now
 
             job.current_step = progress.current_step
             job.progress = progress.percentage
+            job.elapsed_seconds = elapsed_seconds
+            job.current_loss = progress.loss
+            job.eta_seconds = progress.eta_seconds
+            if iteration_speed is not None:
+                job.iteration_speed = round(iteration_speed, 2)
             jobs_store[job_id] = job
 
             # Log step to job log

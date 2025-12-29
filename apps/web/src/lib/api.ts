@@ -218,6 +218,28 @@ export interface TrainingJob {
   started_at: string | null
   completed_at: string | null
   output_path: string | null
+  // Extended fields for UI display
+  base_model: string
+  preset_name: string | null
+  iteration_speed: number | null
+  eta_seconds: number | null
+  elapsed_seconds: number | null
+  current_loss: number | null
+}
+
+export interface StartTrainingRequest {
+  character_id: string
+  config: TrainingConfig
+  preset_name?: string
+  base_model?: string
+}
+
+export interface GPUMetrics {
+  utilization: number
+  memory_used: number
+  memory_total: number
+  temperature: number
+  power_watts: number
 }
 
 // Generation types
@@ -389,7 +411,12 @@ export const api = {
     apiRequest<void>(`/characters/${characterId}/images/${encodeURIComponent(filename)}`, { method: 'DELETE' }),
 
   // Training
-  startTraining: (characterId: string, config: Partial<TrainingConfig> = {}) =>
+  startTraining: (
+    characterId: string,
+    config: Partial<TrainingConfig> = {},
+    presetName?: string,
+    baseModel: string = 'flux-dev'
+  ) =>
     apiRequest<TrainingJob>('/training', {
       method: 'POST',
       body: JSON.stringify({
@@ -403,15 +430,26 @@ export const api = {
           lora_rank: 16,
           ...config,
         },
+        preset_name: presetName,
+        base_model: baseModel,
       }),
     }),
   getTrainingJob: (jobId: string) => apiRequest<TrainingJob>(`/training/${jobId}`),
   cancelTraining: (jobId: string) =>
     apiRequest<TrainingJob>(`/training/${jobId}/cancel`, { method: 'POST' }),
-  listTrainingJobs: (characterId?: string) => {
-    const query = characterId ? `?character_id=${characterId}` : ''
+  listTrainingJobs: (characterId?: string, status?: string) => {
+    const params = new URLSearchParams()
+    if (characterId) params.append('character_id', characterId)
+    if (status) params.append('status', status)
+    const query = params.toString() ? `?${params.toString()}` : ''
     return apiRequest<TrainingJob[]>(`/training${query}`)
   },
+  listSuccessfulTrainingJobs: (characterId?: string) => {
+    const query = characterId ? `?character_id=${characterId}` : ''
+    return apiRequest<TrainingJob[]>(`/training/successful${query}`)
+  },
+  listOngoingTrainingJobs: () =>
+    apiRequest<TrainingJob[]>('/training/ongoing'),
 
   // Generation
   generateImages: (config: GenerationConfig, count: number = 1) =>

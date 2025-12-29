@@ -119,6 +119,14 @@ class TrainingJob(BaseModel):
     completed_at: datetime | None = Field(None)
     output_path: str | None = Field(None, description="Path to trained model")
 
+    # Extended fields for UI display
+    base_model: str = Field("flux-dev", description="Base model used for training")
+    preset_name: str | None = Field(None, description="Preset name if used (quick/balanced/quality/custom)")
+    iteration_speed: float | None = Field(None, description="Current training speed in it/s")
+    eta_seconds: int | None = Field(None, description="Estimated time remaining in seconds")
+    elapsed_seconds: int | None = Field(None, description="Elapsed training time in seconds")
+    current_loss: float | None = Field(None, description="Current training loss value")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -127,7 +135,9 @@ class TrainingJob(BaseModel):
                 "status": "running",
                 "progress": 45.5,
                 "current_step": 682,
-                "total_steps": 1500
+                "total_steps": 1500,
+                "base_model": "flux-dev",
+                "preset_name": "balanced"
             }
         }
 
@@ -136,6 +146,8 @@ class StartTrainingRequest(BaseModel):
     """Request to start training."""
     character_id: str = Field(..., description="Character to train")
     config: TrainingConfig = Field(default_factory=TrainingConfig)
+    preset_name: str | None = Field(None, description="Preset name if used (quick/balanced/quality/custom)")
+    base_model: str = Field("flux-dev", description="Base model to use for training")
 
 
 # ============================================

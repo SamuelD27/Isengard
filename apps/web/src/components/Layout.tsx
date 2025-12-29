@@ -88,7 +88,9 @@ export default function Layout({ children }: LayoutProps) {
         {/* Navigation */}
         <nav className="flex-1 py-4 px-2 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
-            const isActive = location.pathname === item.path
+            // Check for active state - handle nested routes
+            const isActive = location.pathname === item.path ||
+              (item.path !== '/' && location.pathname.startsWith(item.path + '/'))
             return (
               <Link
                 key={item.path}
@@ -161,7 +163,15 @@ export default function Layout({ children }: LayoutProps) {
         <header className="flex items-center justify-between h-14 px-6 border-b border-border bg-background-secondary">
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-medium text-foreground">
-              {navItems.find((item) => item.path === location.pathname)?.label || 'Dashboard'}
+              {(() => {
+                // Handle nested training routes
+                if (location.pathname === '/training/start') return 'Start Training'
+                if (location.pathname === '/training/ongoing') return 'Ongoing Training'
+                if (location.pathname.startsWith('/training/train-')) return 'Training Details'
+                // Default to nav item label
+                return navItems.find((item) => item.path === location.pathname ||
+                  (item.path !== '/' && location.pathname.startsWith(item.path + '/')))?.label || 'Dashboard'
+              })()}
             </h1>
           </div>
           <div className="flex items-center gap-3 text-sm text-muted-foreground">

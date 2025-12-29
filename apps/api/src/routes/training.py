@@ -149,6 +149,8 @@ async def start_training(
         config=request.config,
         total_steps=request.config.steps,
         created_at=datetime.now(timezone.utc),
+        base_model=request.base_model,
+        preset_name=request.preset_name,
     )
 
     # Save job
@@ -312,8 +314,45 @@ async def cancel_training(job_id: str):
 
 
 @router.get("", response_model=list[TrainingJob])
-async def list_training_jobs(character_id: str = None):
+async def list_training_jobs(
+    character_id: str = None,
+    status: str = None,
+):
     """
-    List training jobs, optionally filtered by character.
+    List training jobs, optionally filtered by character and/or status.
+
+    Args:
+        character_id: Filter by character ID
+        status: Comma-separated list of statuses to filter by
+                (e.g., "running,queued" or "completed" or "failed")
     """
-    return await _list_jobs(character_id)
+    jobs = await _list_jobs(character_id)
+
+    # Filter by status if provided
+    if status:
+        status_list = [s.strip().lower() for s in status.split(",")]
+        jobs = [j for j in jobs if j.status.value.lower() in status_list]
+
+    return jobs
+
+
+@router.get("/successful", response_model=list[TrainingJob])
+async def list_successful_training_jobs(character_id: str = None):
+    """
+    List only successful (completed) training jobs.
+
+    Convenience endpoint for the training history view.
+    """
+    jobs = await _list_jobs(character_id)
+    return [j for j in jobs if j.status == JobStatus.COMPLETED]
+
+
+@router.get("/ongoing", response_model=list[TrainingJob])
+async def list_ongoing_training_jobs():
+    """
+    List only ongoing (running or queued) training jobs.
+
+    Convenience endpoint for the ongoing training view.
+    """
+    jobs = await _list_jobs()
+    return [j for j in jobs if j.status in [JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.PENDING]]
