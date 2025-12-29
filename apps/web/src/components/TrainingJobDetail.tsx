@@ -18,16 +18,12 @@ import {
   Check,
   AlertTriangle,
   RefreshCw,
-  ChevronDown,
-  ChevronUp,
-  Play,
   Square,
   Terminal,
   Image as ImageIcon,
   Clock,
   Gauge,
   Bug,
-  ExternalLink,
   Maximize2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -35,7 +31,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { api, TrainingJob } from '@/lib/api'
+import { TrainingJob } from '@/lib/api'
 
 interface TrainingJobDetailProps {
   job: TrainingJob
@@ -87,7 +83,6 @@ export function TrainingJobDetail({
   const [samples, setSamples] = useState<SampleImage[]>([])
   const [sseConnected, setSseConnected] = useState(false)
   const [sseError, setSseError] = useState<string | null>(null)
-  const [showAllLogs, setShowAllLogs] = useState(false)
   const [logFilter, setLogFilter] = useState<'all' | 'info' | 'error'>('all')
   const [copiedId, setCopiedId] = useState(false)
   const [selectedSample, setSelectedSample] = useState<SampleImage | null>(null)

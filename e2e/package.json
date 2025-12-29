@@ -1,0 +1,33 @@
+{
+  "name": "isengard-e2e",
+  "version": "2.0.0",
+  "description": "Comprehensive E2E Browser Tests for Isengard GUI",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "HEADED=1 playwright test",
+    "test:ui": "playwright test --ui",
+    "test:smoke": "playwright test --grep @smoke",
+    "test:flows": "playwright test tests/flows/",
+    "test:training": "playwright test tests/flows/training.spec.ts",
+    "test:edge": "playwright test tests/edge-cases/",
+    "test:visual": "playwright test tests/visual/",
+    "test:debug": "PWDEBUG=1 playwright test",
+    "test:chromium": "playwright test --project=chromium-desktop",
+    "test:all-browsers": "playwright test --project=chromium-desktop --project=firefox-desktop --project=webkit-desktop",
+    "report": "playwright show-report",
+    "trace": "playwright show-trace artifacts/test-results/*/trace.zip",
+    "update-snapshots": "playwright test --update-snapshots",
+    "clean": "rm -rf artifacts playwright-report test-results",
+    "install-browsers": "playwright install --with-deps",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

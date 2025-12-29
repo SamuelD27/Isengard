@@ -17,7 +17,6 @@ import {
   Download,
   AlertTriangle,
   Eye,
-  ExternalLink,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
@@ -353,6 +352,7 @@ export default function TrainingPage() {
                     className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
                     value={selectedCharacter}
                     onChange={(e) => setSelectedCharacter(e.target.value)}
+                    data-testid="character-select"
                   >
                     <option value="">Select character...</option>
                     {eligibleCharacters.map((char: Character) => (
@@ -560,6 +560,7 @@ export default function TrainingPage() {
                 className="w-full"
                 disabled={!selectedCharacter || startMutation.isPending || !!runningJob}
                 onClick={handleStartTraining}
+                data-testid="start-training-btn"
               >
                 <Play className="mr-2 h-4 w-4" />
                 {startMutation.isPending ? 'Starting...' : runningJob ? 'Training in Progress...' : 'Start Training'}
@@ -616,7 +617,7 @@ export default function TrainingPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="bg-background rounded-md border border-border p-3 h-48 overflow-y-auto font-mono text-xs">
+                <div className="bg-background rounded-md border border-border p-3 h-48 overflow-y-auto font-mono text-xs" data-testid="training-logs">
                   {logs.length === 0 ? (
                     <p className="text-muted-foreground">Waiting for logs...</p>
                   ) : (
@@ -658,31 +659,33 @@ export default function TrainingPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="space-y-3">
-            {jobs.map((job: TrainingJob) => (
-              <TrainingJobCard
-                key={job.id}
-                job={job}
-                character={characters.find((c: Character) => c.id === job.character_id)}
-                onCancel={() => cancelMutation.mutate(job.id)}
-                onViewDetails={() => setSelectedJobDetail(job)}
-                isActive={job.id === runningJob?.id}
-              />
-            ))}
-          </div>
+          <>
+            <div className="space-y-3">
+              {jobs.map((job: TrainingJob) => (
+                <TrainingJobCard
+                  key={job.id}
+                  job={job}
+                  character={characters.find((c: Character) => c.id === job.character_id)}
+                  onCancel={() => cancelMutation.mutate(job.id)}
+                  onViewDetails={() => setSelectedJobDetail(job)}
+                  isActive={job.id === runningJob?.id}
+                />
+              ))}
+            </div>
 
-          {/* Job Detail Modal */}
-          {selectedJobDetail && (
-            <TrainingJobDetail
-              job={selectedJobDetail}
-              characterName={characters.find((c: Character) => c.id === selectedJobDetail.character_id)?.name}
-              onClose={() => setSelectedJobDetail(null)}
-              onCancel={() => {
-                cancelMutation.mutate(selectedJobDetail.id)
-                setSelectedJobDetail(null)
-              }}
-            />
-          )}
+            {/* Job Detail Modal */}
+            {selectedJobDetail && (
+              <TrainingJobDetail
+                job={selectedJobDetail}
+                characterName={characters.find((c: Character) => c.id === selectedJobDetail.character_id)?.name}
+                onClose={() => setSelectedJobDetail(null)}
+                onCancel={() => {
+                  cancelMutation.mutate(selectedJobDetail.id)
+                  setSelectedJobDetail(null)
+                }}
+              />
+            )}
+          </>
         )}
       </div>
     </div>
@@ -708,7 +711,7 @@ function TrainingJobCard({ job, character, onCancel, onViewDetails, isActive }: 
   }
 
   return (
-    <Card className={`${isActive ? 'border-accent' : ''} cursor-pointer hover:border-accent/50 transition-colors`} onClick={onViewDetails}>
+    <Card className={`${isActive ? 'border-accent' : ''} cursor-pointer hover:border-accent/50 transition-colors`} onClick={onViewDetails} data-testid="training-job-card" data-job-id={job.id}>
       <CardContent className="py-4">
         <div className="flex items-center justify-between mb-3">
           <div className="min-w-0">
@@ -718,7 +721,7 @@ function TrainingJobCard({ job, character, onCancel, onViewDetails, isActive }: 
             </h3>
             <p className="text-xs text-muted-foreground font-mono">{job.id}</p>
           </div>
-          <span className={statusClasses[job.status]}>{job.status}</span>
+          <span className={statusClasses[job.status]} data-testid="job-status">{job.status}</span>
         </div>
 
         {(job.status === 'running' || job.status === 'queued') && (

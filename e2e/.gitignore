@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Test artifacts (not committed)
+artifacts/
+test-results/
+playwright-report/
+
+# Keep baselines (committed)
+!baselines/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -142,7 +142,7 @@ export default function CharactersPage() {
           <h1 className="text-xl font-semibold text-foreground">New Character</h1>
         </div>
 
-        <Card>
+        <Card data-testid="character-form">
           <CardHeader>
             <CardTitle>Character Details</CardTitle>
             <CardDescription>
@@ -154,6 +154,7 @@ export default function CharactersPage() {
               <Label htmlFor="name">Name</Label>
               <Input
                 id="name"
+                data-testid="character-name-input"
                 placeholder="e.g., John Smith"
                 value={newCharacter.name}
                 onChange={(e) => setNewCharacter({ ...newCharacter, name: e.target.value })}
@@ -163,6 +164,7 @@ export default function CharactersPage() {
               <Label htmlFor="trigger">Trigger Word</Label>
               <Input
                 id="trigger"
+                data-testid="character-trigger-input"
                 placeholder="e.g., johnsmith_person"
                 value={newCharacter.trigger_word}
                 onChange={(e) => setNewCharacter({ ...newCharacter, trigger_word: e.target.value })}
@@ -282,12 +284,13 @@ export default function CharactersPage() {
             </div>
           </CardContent>
           <CardFooter className="flex justify-between border-t border-border pt-5">
-            <Button variant="outline" onClick={handleCancelCreate}>
+            <Button variant="outline" onClick={handleCancelCreate} data-testid="cancel-btn">
               Cancel
             </Button>
             <Button
               onClick={handleCreate}
               disabled={!newCharacter.name || !newCharacter.trigger_word || createMutation.isPending || isUploading}
+              data-testid="create-character-btn"
             >
               {createMutation.isPending || isUploading ? (
                 <>
@@ -336,7 +339,7 @@ export default function CharactersPage() {
             Create and manage character identities for LoRA training
           </p>
         </div>
-        <Button onClick={() => setIsCreating(true)}>
+        <Button onClick={() => setIsCreating(true)} data-testid="new-character-btn">
           <Plus className="mr-2 h-4 w-4" />
           New Character
         </Button>
@@ -363,7 +366,7 @@ export default function CharactersPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3" data-testid="character-grid">
           {characters.map((character: Character) => (
             <CharacterCard
               key={character.id}
@@ -394,7 +397,7 @@ interface CharacterCardProps {
 
 function CharacterCard({ character, onClick, onUpload, onDelete, onTrain }: CharacterCardProps) {
   return (
-    <Card className="hover:border-border-hover transition-colors">
+    <Card className="hover:border-border-hover transition-colors" data-testid="character-card" data-character-id={character.id}>
       <CardHeader className="pb-2">
         <div className="flex items-start justify-between">
           <div>
@@ -452,6 +455,7 @@ function CharacterCard({ character, onClick, onUpload, onDelete, onTrain }: Char
           size="icon"
           className="text-muted-foreground hover:text-destructive"
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          data-testid="delete-character-btn"
         >
           <Trash2 className="h-4 w-4" />
         </Button>

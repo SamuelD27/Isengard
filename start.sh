@@ -54,8 +54,8 @@ header() { echo -e "\n${BLUE}=== $1 ===${NC}\n"; }
 # ============================================================
 # STARTUP BANNER
 # ============================================================
-SCRIPT_VERSION="v2.1.0-nginx-aitoolkit"
-BUILD_DATE="2025-12-28"
+SCRIPT_VERSION="v2.2.1-live-progress"
+BUILD_DATE="2025-12-29"
 
 # Generate SHA256 of this script for verification
 SCRIPT_SHA=$(sha256sum /start.sh 2>/dev/null | cut -c1-12 || echo "unknown")
@@ -75,6 +75,8 @@ echo -e "${BLUE}║${NC}   Build Date:     ${GREEN}${BUILD_DATE}${NC}           
 echo -e "${BLUE}║${NC}   Script SHA256:  ${GREEN}${SCRIPT_SHA}${NC}                              ${BLUE}║${NC}"
 echo -e "${BLUE}║${NC}                                                            ${BLUE}║${NC}"
 echo -e "${BLUE}║${NC}   Features:                                                ${BLUE}║${NC}"
+echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} SSH access on TCP port 22                           ${BLUE}║${NC}"
+echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} Fast parallel model downloads with live progress    ${BLUE}║${NC}"
 echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} nginx reverse proxy (port 3000 → API 8000)          ${BLUE}║${NC}"
 echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} AI-Toolkit isolated venv                            ${BLUE}║${NC}"
 echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} SSE streaming support                               ${BLUE}║${NC}"
@@ -169,127 +171,236 @@ header "Downloading Models"
 export HF_HOME="${HF_CACHE}"
 export TRANSFORMERS_CACHE="${HF_CACHE}"
 
-# Install aria2 for fast multi-connection downloads
-apt-get update -qq && apt-get install -y -qq aria2 > /dev/null 2>&1 || true
+# Download tuning flags
+PARALLEL_MODEL_DOWNLOADS="${PARALLEL_MODEL_DOWNLOADS:-1}"  # Set to 0 to disable parallel downloads
+DID_DOWNLOAD=0  # Track if any files were downloaded (for sync-back gate)
+
+# Optimized rclone flags for R2/S3
+# --fast-list: Use fewer API calls by listing directories recursively (faster for many files)
+# --checkers 32: Increase parallel file checkers for faster comparison
+# --transfers 32: Increase parallel file transfers
+# --multi-thread-streams 16: Streams per file for large files
+# --multi-thread-cutoff 50M: Enable multi-thread for files >50MB
+# --buffer-size 128M: Larger buffer for better throughput
+# --ignore-existing: Skip files that already exist locally (idempotent cold starts)
+# --progress: Show real-time progress with transfer speed
+# --stats 2s: Update stats every 2 seconds
+# --log-level INFO: Show transfer info without debug noise
+RCLONE_COPY_FLAGS="--fast-list --checkers 32 --transfers 32 --multi-thread-streams 16 --multi-thread-cutoff 50M --buffer-size 128M --ignore-existing --progress --stats 2s --log-level INFO"
+
+# Optimized aria2 flags for HuggingFace downloads
+# -x 32: 32 connections per server
+# -s 32: Split file into 32 segments
+# -k 1M: Minimum split size 1MB
+# --file-allocation=none: Faster startup (no preallocation)
+# --disk-cache=64M: Disk cache for better write performance
+# --show-console-readout=true: Show download progress bar
+# --human-readable=true: Human readable sizes
+# --download-result=hide: Hide per-file results, show summary only
+ARIA2_FLAGS="-x 32 -s 32 -k 1M --file-allocation=none --disk-cache=64M --show-console-readout=true --human-readable=true --summary-interval=5 --download-result=hide"
+
+# Install aria2 for fast multi-connection downloads (only if not present)
+command -v aria2c > /dev/null 2>&1 || {
+    log "Installing aria2..."
+    apt-get update -qq && apt-get install -y -qq aria2 > /dev/null 2>&1 || true
+}
 
 # Function: Download from R2 with rclone (ultra fast)
+# Shows live progress bar directly to terminal
 download_from_r2() {
     local src="$1"
     local dst="$2"
-    log "Downloading from R2: $src"
+    local start_time=$(date +%s)
+    local log_file="/tmp/rclone_${RANDOM}.log"
+
+    echo ""
+    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC} ${GREEN}Downloading:${NC} ${src}"
+    echo -e "${BLUE}│${NC} ${GREEN}Destination:${NC} ${dst}"
+    echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+
+    # Run rclone with live progress output, log to file for transfer tracking
     rclone copy "r2:${R2_BUCKET}/${src}" "${dst}" \
-        --transfers 16 \
-        --checkers 8 \
-        --multi-thread-streams 8 \
-        --buffer-size 64M \
-        --progress \
-        --stats-one-line \
-        2>&1 | tail -1
+        ${RCLONE_COPY_FLAGS} \
+        --log-file="${log_file}" \
+        2>&1
+
+    local exit_code=$?
+    local end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+
+    if [ $exit_code -eq 0 ]; then
+        # Check log file for actual transfers (not just checks)
+        if grep -qE "Copied|Transferred" "${log_file}" 2>/dev/null; then
+            DID_DOWNLOAD=1
+        fi
+        echo -e "${GREEN}✓ Completed ${src} in ${elapsed}s${NC}"
+    else
+        echo -e "${RED}✗ Failed ${src} (exit code: ${exit_code})${NC}"
+        cat "${log_file}" 2>/dev/null | tail -10
+    fi
+
+    rm -f "${log_file}" 2>/dev/null
+    echo ""
+    return $exit_code
 }
 
 # Function: Download from HuggingFace with aria2 (fast parallel)
+# Shows live progress bar directly to terminal
 download_from_hf() {
     local repo="$1"
     local file="$2"
     local dst="$3"
+    local start_time=$(date +%s)
 
-    log "Downloading from HuggingFace: $repo/$file"
+    # Skip if file already exists
+    if [ -f "${dst}/${file}" ]; then
+        echo -e "${GREEN}✓ ${file} already exists, skipping${NC}"
+        return 0
+    fi
 
     # Get download URL
     local url="https://huggingface.co/${repo}/resolve/main/${file}"
 
-    # Use aria2c for multi-connection download
-    aria2c -x 16 -s 16 -k 1M \
+    echo ""
+    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC} ${GREEN}Downloading:${NC} ${file}"
+    echo -e "${BLUE}│${NC} ${GREEN}From:${NC} ${repo}"
+    echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+
+    # Use aria2c for multi-connection download with live progress
+    if aria2c ${ARIA2_FLAGS} \
         --header="Authorization: Bearer ${HF_TOKEN}" \
         -d "${dst}" \
         -o "${file}" \
-        "${url}" \
-        --console-log-level=warn \
-        --summary-interval=10 \
-        2>&1 || {
-            # Fallback to wget if aria2c fails
-            warn "aria2c failed, using wget..."
-            wget -q --show-progress \
-                --header="Authorization: Bearer ${HF_TOKEN}" \
-                -O "${dst}/${file}" \
-                "${url}"
-        }
+        "${url}"; then
+        DID_DOWNLOAD=1
+        local end_time=$(date +%s)
+        local elapsed=$((end_time - start_time))
+        echo -e "${GREEN}✓ Downloaded ${file} in ${elapsed}s${NC}"
+    else
+        # Fallback to wget if aria2c fails
+        echo -e "${YELLOW}aria2c failed, trying wget...${NC}"
+        if wget --progress=bar:force:noscroll \
+            --header="Authorization: Bearer ${HF_TOKEN}" \
+            -O "${dst}/${file}" \
+            "${url}" 2>&1; then
+            DID_DOWNLOAD=1
+            local end_time=$(date +%s)
+            local elapsed=$((end_time - start_time))
+            echo -e "${GREEN}✓ Downloaded ${file} via wget in ${elapsed}s${NC}"
+        else
+            echo -e "${RED}✗ Failed to download ${file}${NC}"
+            return 1
+        fi
+    fi
+    echo ""
 }
 
+# Optimized rclone flags for S3/R2 uploads
+# --s3-chunk-size 64M: Larger chunks for multipart upload (better throughput)
+# --s3-upload-concurrency 8: Parallel parts per file upload
+# --fast-list: Reduce API calls
+RCLONE_SYNC_FLAGS="--fast-list --checkers 16 --transfers 16 --s3-chunk-size 64M --s3-upload-concurrency 8 --progress --stats 5s --log-level INFO"
+
 # Function: Sync models to R2 (run once after HF download)
+# Shows live progress bar directly to terminal
 sync_to_r2() {
-    log "Syncing models to R2 for future fast downloads..."
+    local start_time=$(date +%s)
+
+    echo ""
+    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${BLUE}│${NC} ${GREEN}Syncing models to R2 for future fast downloads...${NC}"
+    echo -e "${BLUE}│${NC} ${GREEN}Source:${NC} ${COMFYUI_MODELS}"
+    echo -e "${BLUE}│${NC} ${GREEN}Dest:${NC}   r2:${R2_BUCKET}/comfyui/models"
+    echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+
     rclone sync "${COMFYUI_MODELS}" "r2:${R2_BUCKET}/comfyui/models" \
-        --transfers 8 \
-        --progress \
-        --stats-one-line \
-        2>&1 | tail -5
-    log "Models synced to R2"
+        ${RCLONE_SYNC_FLAGS} 2>&1
+
+    local end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+    echo -e "${GREEN}✓ Models synced to R2 in ${elapsed}s${NC}"
+    echo ""
 }
 
 # Check if models exist on R2
 log "Checking R2 for cached models..."
+DOWNLOAD_START_TIME=$(date +%s)
 R2_HAS_MODELS=$(rclone ls "r2:${R2_BUCKET}/comfyui/models/checkpoints/" 2>/dev/null | grep -c "flux1-dev" || echo "0")
 
 if [ "$R2_HAS_MODELS" -gt 0 ]; then
     log "Models found on R2, downloading via rclone (ultra fast)..."
 
-    download_from_r2 "comfyui/models/checkpoints" "${COMFYUI_MODELS}/checkpoints"
-    download_from_r2 "comfyui/models/vae" "${COMFYUI_MODELS}/vae"
-    download_from_r2 "comfyui/models/clip" "${COMFYUI_MODELS}/clip"
+    if [ "$PARALLEL_MODEL_DOWNLOADS" = "1" ]; then
+        log "Parallel downloads enabled (PARALLEL_MODEL_DOWNLOADS=1)"
 
-    log "All models downloaded from R2"
+        # Run all three downloads in parallel
+        download_from_r2 "comfyui/models/checkpoints" "${COMFYUI_MODELS}/checkpoints" &
+        PID_CHECKPOINTS=$!
+        download_from_r2 "comfyui/models/vae" "${COMFYUI_MODELS}/vae" &
+        PID_VAE=$!
+        download_from_r2 "comfyui/models/clip" "${COMFYUI_MODELS}/clip" &
+        PID_CLIP=$!
+
+        # Wait for all downloads to complete
+        log "Waiting for parallel downloads to complete..."
+        wait $PID_CHECKPOINTS $PID_VAE $PID_CLIP
+        log "All parallel downloads finished"
+    else
+        log "Sequential downloads (PARALLEL_MODEL_DOWNLOADS=0)"
+        download_from_r2 "comfyui/models/checkpoints" "${COMFYUI_MODELS}/checkpoints"
+        download_from_r2 "comfyui/models/vae" "${COMFYUI_MODELS}/vae"
+        download_from_r2 "comfyui/models/clip" "${COMFYUI_MODELS}/clip"
+    fi
+
+    DOWNLOAD_END_TIME=$(date +%s)
+    DOWNLOAD_ELAPSED=$((DOWNLOAD_END_TIME - DOWNLOAD_START_TIME))
+    log "✓ R2 model download complete in ${DOWNLOAD_ELAPSED}s"
 else
     log "Models not on R2, downloading from HuggingFace..."
 
-    # Login to HuggingFace
-    pip install -q huggingface_hub
-    python3 -c "from huggingface_hub import login; login(token='${HF_TOKEN}')"
+    # Validate HF_TOKEN (also check HUGGINGFACE_TOKEN as fallback)
+    HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_TOKEN:-}}"
+    if [ -z "$HF_TOKEN" ]; then
+        error "HF_TOKEN (or HUGGINGFACE_TOKEN) environment variable is not set!"
+        error "Cannot download from HuggingFace without authentication."
+        error "Please set HF_TOKEN in secrets.sh or as an environment variable."
+        # Skip HF downloads but don't exit - models might already exist
+    else
+        log "HF_TOKEN is set (length: ${#HF_TOKEN} chars)"
 
-    # FLUX.1-dev
-    FLUX_DEV="${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors"
-    if [ ! -f "$FLUX_DEV" ]; then
+        # Login to HuggingFace (silent, only if huggingface_hub available)
+        pip install -q huggingface_hub 2>/dev/null || true
+        python3 -c "from huggingface_hub import login; login(token='${HF_TOKEN}', add_to_git_credential=False)" 2>/dev/null || true
+
+        # FLUX.1-dev (~23GB)
         download_from_hf "black-forest-labs/FLUX.1-dev" "flux1-dev.safetensors" "${COMFYUI_MODELS}/checkpoints"
-    else
-        log "FLUX.1-dev already exists"
-    fi
 
-    # FLUX.1-schnell
-    FLUX_SCHNELL="${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors"
-    if [ ! -f "$FLUX_SCHNELL" ]; then
+        # FLUX.1-schnell (~23GB)
         download_from_hf "black-forest-labs/FLUX.1-schnell" "flux1-schnell.safetensors" "${COMFYUI_MODELS}/checkpoints"
-    else
-        log "FLUX.1-schnell already exists"
-    fi
 
-    # VAE
-    VAE="${COMFYUI_MODELS}/vae/ae.safetensors"
-    if [ ! -f "$VAE" ]; then
+        # VAE (~167MB)
         download_from_hf "black-forest-labs/FLUX.1-dev" "ae.safetensors" "${COMFYUI_MODELS}/vae"
-    else
-        log "VAE already exists"
-    fi
 
-    # CLIP-L
-    CLIP_L="${COMFYUI_MODELS}/clip/clip_l.safetensors"
-    if [ ! -f "$CLIP_L" ]; then
+        # CLIP-L (~246MB)
         download_from_hf "comfyanonymous/flux_text_encoders" "clip_l.safetensors" "${COMFYUI_MODELS}/clip"
-    else
-        log "CLIP-L already exists"
-    fi
 
-    # T5-XXL
-    T5="${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors"
-    if [ ! -f "$T5" ]; then
+        # T5-XXL (~9.5GB)
         download_from_hf "comfyanonymous/flux_text_encoders" "t5xxl_fp16.safetensors" "${COMFYUI_MODELS}/clip"
-    else
-        log "T5-XXL already exists"
+
+        DOWNLOAD_END_TIME=$(date +%s)
+        DOWNLOAD_ELAPSED=$((DOWNLOAD_END_TIME - DOWNLOAD_START_TIME))
+        log "✓ HuggingFace model download complete in ${DOWNLOAD_ELAPSED}s"
+
+        # Sync to R2 for next time (only if we actually downloaded something)
+        if [ "$DID_DOWNLOAD" = "1" ]; then
+            log "Syncing downloaded models to R2 in background..."
+            sync_to_r2 &
+        else
+            log "No new files downloaded, skipping R2 sync"
+        fi
     fi
-
-    log "All models downloaded from HuggingFace"
-
-    # Sync to R2 for next time (run in background)
-    sync_to_r2 &
 fi
 
 # ============================================================
@@ -538,6 +649,62 @@ else
     warn "AI-Toolkit setup may be incomplete"
 fi
 
+echo ""
+
+# ============================================================
+# 12. MODEL VALIDATION SELF-CHECK
+# ============================================================
+header "Model Validation Self-Check"
+
+# Print rclone version for debugging
+log "Tool versions:"
+echo "  rclone: $(rclone --version 2>/dev/null | head -1 || echo 'not installed')"
+echo "  aria2c: $(aria2c --version 2>/dev/null | head -1 || echo 'not installed')"
+
+# Required models list
+REQUIRED_MODELS=(
+    "${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors"
+    "${COMFYUI_MODELS}/checkpoints/flux1-schnell.safetensors"
+    "${COMFYUI_MODELS}/vae/ae.safetensors"
+    "${COMFYUI_MODELS}/clip/clip_l.safetensors"
+    "${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors"
+)
+
+log "Required model files:"
+MODELS_OK=0
+MODELS_MISSING=0
+for model in "${REQUIRED_MODELS[@]}"; do
+    model_name=$(basename "$model")
+    if [ -f "$model" ]; then
+        # Get file size in human-readable format
+        size=$(ls -lh "$model" 2>/dev/null | awk '{print $5}')
+        echo "  ✓ ${model_name} (${size})"
+        ((MODELS_OK++))
+    else
+        echo "  ✗ ${model_name} MISSING"
+        ((MODELS_MISSING++))
+    fi
+done
+
+# Directory stats
+log "Model directory stats:"
+for dir in checkpoints vae clip; do
+    dir_path="${COMFYUI_MODELS}/${dir}"
+    if [ -d "$dir_path" ]; then
+        file_count=$(find "$dir_path" -type f -name "*.safetensors" 2>/dev/null | wc -l | tr -d ' ')
+        total_size=$(du -sh "$dir_path" 2>/dev/null | cut -f1)
+        echo "  ${dir}/: ${file_count} files, ${total_size:-0}"
+    else
+        echo "  ${dir}/: directory not found"
+    fi
+done
+
+echo ""
+if [ $MODELS_MISSING -eq 0 ]; then
+    log "✓ All ${MODELS_OK} required models present"
+else
+    warn "✗ ${MODELS_MISSING} of $((MODELS_OK + MODELS_MISSING)) required models missing!"
+fi
 echo ""
 
 # Keep container running

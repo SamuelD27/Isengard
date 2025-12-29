@@ -393,9 +393,6 @@ echo "  CLIP-L:         $([ -f '${COMFYUI_MODELS}/clip/clip_l.safetensors' ] && 
 echo "  T5-XXL:         $([ -f '${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors' ] && echo '✓' || echo '✗')"
 echo ""
 
-# Keep container running
-tail -f /dev/null
-
 # ============================================================
 # 11. AI-TOOLKIT SETUP (for training)
 # ============================================================
