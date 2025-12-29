@@ -87,3 +87,8 @@ dist/
 # ============================================
 *.log
 docker-compose.override.yml
+
+# ============================================
+# Legacy Dump (archival only - never build/run)
+# ============================================
+_legacy_dump/

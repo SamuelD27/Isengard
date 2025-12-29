@@ -53,3 +53,6 @@ reports/
 *.log
 docker-compose*.yml
 Makefile
+
+# Legacy dump - NEVER include in Docker images
+_legacy_dump/

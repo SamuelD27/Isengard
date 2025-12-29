@@ -281,6 +281,118 @@ Types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `style`
 - ❌ Let a session end with `git status` showing modified files
 - ❌ Wait for user to explicitly ask for a commit
 
+### 11. No Legacy in Build (Zero-Tolerance) - CRITICAL
+
+> **When implementing, refactoring, or replacing a feature, the new version MUST be the only one visible to runtime, Docker build context, and execution paths.**
+
+Legacy, superseded, or obsolete files left in active directories cause deployment failures, confusion, and bugs. This rule enforces aggressive cleanup.
+
+#### Legacy Handling Policy (Non-Optional)
+
+When you create a new script/module/config that replaces an existing one:
+
+1. **You MUST NOT leave the legacy file in-place**
+2. **You MUST take action** — either:
+   - **DELETE** it entirely (preferred), OR
+   - **MOVE** it to the legacy dump directory
+
+**Silence or ambiguity is not acceptable — action is mandatory.**
+
+#### Legacy Dump Directory
+
+| Attribute | Value |
+|-----------|-------|
+| **Path** | `/_legacy_dump/` (repo root) |
+| **Purpose** | Archival ONLY — never imported, executed, or referenced |
+| **Excluded from** | `.gitignore`, `.dockerignore` |
+
+Files in `/_legacy_dump/`:
+- ❌ May NOT be imported by any module
+- ❌ May NOT be referenced in configs
+- ❌ May NOT be mounted into containers
+- ❌ May NOT be copied during Docker build
+- ✅ Exist purely for historical reference if needed
+
+#### Build & Runtime Safety
+
+Docker images built from this repo MUST only include active implementations:
+
+```
+✓ Active code:     apps/, packages/, scripts/, start.sh
+✗ Legacy code:     /_legacy_dump/* (excluded by .dockerignore)
+```
+
+#### Change Discipline
+
+Whenever you modify functionality:
+
+1. **Identify** — Explicitly list which files are now obsolete
+2. **Act** — Delete or relocate them in the **same commit**
+3. **Verify** — Confirm no duplicates, shadows, or "just in case" files remain
+
+#### Enforcement Checklist (Claude MUST Self-Verify)
+
+Before concluding ANY task involving file creation or modification:
+
+```
+□ No obsolete files remain outside /_legacy_dump/
+□ No duplicate implementations exist in active paths
+□ Docker build context contains only current code
+□ All imports and references point to the new version
+□ Old file paths are not hardcoded anywhere
+```
+
+#### Zero-Tolerance Rule
+
+| Violation | Status |
+|-----------|--------|
+| Leaving deprecated files in active directories | **FAILURE** |
+| Creating new file without removing old version | **FAILURE** |
+| "Keeping it just in case" in active paths | **FAILURE** |
+| Forgetting to check for shadows/duplicates | **FAILURE** |
+
+#### Example Scenarios
+
+**Scenario 1: Replacing a startup script**
+```bash
+# OLD: deploy/runpod/start.sh (200 lines, outdated)
+# NEW: start.sh (500 lines, current)
+
+# CORRECT ACTION:
+rm deploy/runpod/start.sh  # DELETE - it's superseded
+# OR
+mv deploy/runpod/start.sh _legacy_dump/deploy-runpod-start-v1.sh
+```
+
+**Scenario 2: Refactoring a module**
+```bash
+# OLD: packages/shared/src/old_logging.py
+# NEW: packages/shared/src/logging.py
+
+# CORRECT ACTION:
+rm packages/shared/src/old_logging.py
+git grep -l "old_logging" | xargs sed -i 's/old_logging/logging/g'
+```
+
+**Scenario 3: Moving functionality**
+```bash
+# OLD: apps/api/src/utils/helpers.py (has generate_id())
+# NEW: packages/shared/src/utils.py (now has generate_id())
+
+# CORRECT ACTION:
+# 1. Update all imports to use new location
+# 2. Delete the old file OR remove the moved function from it
+# 3. Verify: git grep "from.*helpers import"
+```
+
+#### Red Flags (Immediate Action Required)
+
+- ❌ Two files with similar names doing similar things
+- ❌ Files with `_old`, `_backup`, `_v1`, `_deprecated` suffixes in active dirs
+- ❌ `deploy/runpod/start.sh` AND `start.sh` both existing
+- ❌ Comments like "# OLD VERSION - DO NOT USE" in active code
+- ❌ Imports pointing to files that have "replacement" versions
+
 ---
 
 ## Architecture Overview
