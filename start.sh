@@ -42,22 +42,80 @@ MODELS_DIR="${VOLUME_ROOT}/models"
 COMFYUI_MODELS="${VOLUME_ROOT}/comfyui/models"
 HF_CACHE="${VOLUME_ROOT}/cache/huggingface"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# ============================================================
+# LOGGING SYSTEM (TTY-aware, container-safe)
+# ============================================================
+# Detect if stdout is a TTY (interactive terminal)
+IS_TTY=0; [ -t 1 ] && IS_TTY=1
 
+# Colors (ANSI escape codes)
+RED='\x1b[31m'
+GREEN='\x1b[32m'
+YELLOW='\x1b[33m'
+BLUE='\x1b[34m'
+CYAN='\x1b[36m'
+GRAY='\x1b[90m'
+BOLD='\x1b[1m'
+NC='\x1b[0m'  # No Color / Reset
+
+# Immutable log functions (always print newline, permanent in logs)
 log() { echo -e "${GREEN}[$(date +'%H:%M:%S')]${NC} $1"; }
-warn() { echo -e "${YELLOW}[$(date +'%H:%M:%S')] WARNING:${NC} $1"; }
-error() { echo -e "${RED}[$(date +'%H:%M:%S')] ERROR:${NC} $1"; }
-header() { echo -e "\n${BLUE}=== $1 ===${NC}\n"; }
+log_info() { echo -e "${GREEN}[$(date +'%H:%M:%S')]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[$(date +'%H:%M:%S')] WARN:${NC} $1"; }
+log_error() { echo -e "${RED}[$(date +'%H:%M:%S')] ERROR:${NC} $1"; }
+warn() { log_warn "$1"; }
+error() { log_error "$1"; }
+
+# Phase header (marks start of a major section)
+log_phase() { echo -e "\n${CYAN}[$(date +'%H:%M:%S')] ▶ $1${NC}"; }
+header() { echo -e "\n${CYAN}=== $1 ===${NC}\n"; }
+
+# Live status line (overwrites in-place on TTY, silent on non-TTY)
+log_status() {
+    if [ "$IS_TTY" = "1" ]; then
+        echo -ne "\x1b[2K\r  ${GRAY}$1${NC}"
+    fi
+}
+
+# Finalize live status (print newline to preserve final state)
+log_status_done() {
+    if [ "$IS_TTY" = "1" ]; then
+        echo ""
+    fi
+}
+
+# Phase completion markers
+log_success() { echo -e "${GREEN}[$(date +'%H:%M:%S')] ✓ $1${NC}"; }
+log_fail() { echo -e "${RED}[$(date +'%H:%M:%S')] ✗ $1${NC}"; }
+
+# Progress tracking for non-TTY (prints every N seconds)
+declare -A LAST_PROGRESS_TIME
+log_progress() {
+    local key="${1:-default}"
+    local msg="$2"
+    local interval="${3:-15}"  # Default 15 seconds between updates
+    local now=$(date +%s)
+    local last="${LAST_PROGRESS_TIME[$key]:-0}"
+
+    if [ $((now - last)) -ge $interval ]; then
+        echo -e "  ${GRAY}$msg${NC}"
+        LAST_PROGRESS_TIME[$key]=$now
+    fi
+}
+
+# Phase failure helper (cleans up and exits)
+phase_failed() {
+    local phase="$1"
+    local reason="$2"
+    log_status_done
+    log_fail "Phase '$phase' failed: $reason"
+    exit 1
+}
 
 # ============================================================
 # STARTUP BANNER
 # ============================================================
-SCRIPT_VERSION="v2.2.2-loop-fix"
+SCRIPT_VERSION="v2.3.0-clean-logs"
 BUILD_DATE="2025-12-30"
 
 # Generate SHA256 of this script for verification
@@ -178,29 +236,23 @@ export TRANSFORMERS_CACHE="${HF_CACHE}"
 PARALLEL_MODEL_DOWNLOADS="${PARALLEL_MODEL_DOWNLOADS:-1}"  # Set to 0 to disable parallel downloads
 DID_DOWNLOAD=0  # Track if any files were downloaded (for sync-back gate)
 
-# Optimized rclone flags for R2/S3
-# --fast-list: Use fewer API calls by listing directories recursively (faster for many files)
-# --checkers 32: Increase parallel file checkers for faster comparison
-# --transfers 32: Increase parallel file transfers
-# --multi-thread-streams 16: Streams per file for large files
-# --multi-thread-cutoff 50M: Enable multi-thread for files >50MB
-# --buffer-size 128M: Larger buffer for better throughput
-# --ignore-existing: Skip files that already exist locally (idempotent cold starts)
-# --progress: Show real-time progress with transfer speed
-# --stats 2s: Update stats every 2 seconds
-# --log-level INFO: Show transfer info without debug noise
-RCLONE_COPY_FLAGS="--fast-list --checkers 32 --transfers 32 --multi-thread-streams 16 --multi-thread-cutoff 50M --buffer-size 128M --ignore-existing --progress --stats 2s --log-level INFO"
+# TTY-aware rclone flags
+# Non-TTY: minimal output with periodic stats (one line every 15s)
+# TTY: full progress bars
+if [ "$IS_TTY" = "1" ]; then
+    RCLONE_COPY_FLAGS="--fast-list --checkers 32 --transfers 32 --multi-thread-streams 16 --multi-thread-cutoff 50M --buffer-size 128M --ignore-existing --progress"
+else
+    # Container logs: quiet with periodic one-line stats
+    RCLONE_COPY_FLAGS="--fast-list --checkers 32 --transfers 32 --multi-thread-streams 16 --multi-thread-cutoff 50M --buffer-size 128M --ignore-existing --stats-one-line --stats 15s -q"
+fi
 
-# Optimized aria2 flags for HuggingFace downloads
-# -x 32: 32 connections per server
-# -s 32: Split file into 32 segments
-# -k 1M: Minimum split size 1MB
-# --file-allocation=none: Faster startup (no preallocation)
-# --disk-cache=64M: Disk cache for better write performance
-# --show-console-readout=true: Show download progress bar
-# --human-readable=true: Human readable sizes
-# --download-result=hide: Hide per-file results, show summary only
-ARIA2_FLAGS="-x 32 -s 32 -k 1M --file-allocation=none --disk-cache=64M --show-console-readout=true --human-readable=true --summary-interval=5 --download-result=hide"
+# TTY-aware aria2 flags
+if [ "$IS_TTY" = "1" ]; then
+    ARIA2_FLAGS="-x 16 -s 16 -k 1M --file-allocation=none --disk-cache=64M --show-console-readout=true --human-readable=true --summary-interval=5"
+else
+    # Container logs: quiet with periodic summary
+    ARIA2_FLAGS="-x 16 -s 16 -k 1M --file-allocation=none --disk-cache=64M --console-log-level=warn --summary-interval=15 --download-result=hide"
+fi
 
 # Install aria2 for fast multi-connection downloads (only if not present)
 command -v aria2c > /dev/null 2>&1 || {
@@ -209,20 +261,17 @@ command -v aria2c > /dev/null 2>&1 || {
 }
 
 # Function: Download from R2 with rclone (ultra fast)
-# Shows live progress bar directly to terminal
+# TTY-aware: shows progress on interactive, quiet stats on container logs
 download_from_r2() {
     local src="$1"
     local dst="$2"
     local start_time=$(date +%s)
     local log_file="/tmp/rclone_${RANDOM}.log"
+    local src_name=$(basename "$src")
 
-    echo ""
-    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${BLUE}│${NC} ${GREEN}Downloading:${NC} ${src}"
-    echo -e "${BLUE}│${NC} ${GREEN}Destination:${NC} ${dst}"
-    echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+    log "Downloading from R2: ${src_name}"
 
-    # Run rclone with live progress output, log to file for transfer tracking
+    # Run rclone with TTY-appropriate flags
     rclone copy "r2:${R2_BUCKET}/${src}" "${dst}" \
         ${RCLONE_COPY_FLAGS} \
         --log-file="${log_file}" \
@@ -237,19 +286,21 @@ download_from_r2() {
         if grep -qE "Copied|Transferred" "${log_file}" 2>/dev/null; then
             DID_DOWNLOAD=1
         fi
-        echo -e "${GREEN}✓ Completed ${src} in ${elapsed}s${NC}"
+        log_success "Downloaded ${src_name} (${elapsed}s)"
     else
-        echo -e "${RED}✗ Failed ${src} (exit code: ${exit_code})${NC}"
-        cat "${log_file}" 2>/dev/null | tail -10
+        log_fail "Failed ${src_name} (exit code: ${exit_code})"
+        # Show last few lines of error on failure
+        tail -5 "${log_file}" 2>/dev/null | while read line; do
+            echo "  ${line}"
+        done
     fi
 
     rm -f "${log_file}" 2>/dev/null
-    echo ""
     return $exit_code
 }
 
 # Function: Download from HuggingFace with aria2 (fast parallel)
-# Shows live progress bar directly to terminal
+# TTY-aware: shows progress on interactive, quiet on container logs
 download_from_hf() {
     local repo="$1"
     local file="$2"
@@ -258,73 +309,66 @@ download_from_hf() {
 
     # Skip if file already exists
     if [ -f "${dst}/${file}" ]; then
-        echo -e "${GREEN}✓ ${file} already exists, skipping${NC}"
+        log_success "${file} already exists, skipping"
         return 0
     fi
 
     # Get download URL
     local url="https://huggingface.co/${repo}/resolve/main/${file}"
 
-    echo ""
-    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${BLUE}│${NC} ${GREEN}Downloading:${NC} ${file}"
-    echo -e "${BLUE}│${NC} ${GREEN}From:${NC} ${repo}"
-    echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+    log "Downloading from HuggingFace: ${file}"
 
-    # Use aria2c for multi-connection download with live progress
+    # Use aria2c for multi-connection download with TTY-appropriate flags
     if aria2c ${ARIA2_FLAGS} \
         --header="Authorization: Bearer ${HF_TOKEN}" \
         -d "${dst}" \
         -o "${file}" \
-        "${url}"; then
+        "${url}" 2>&1; then
         DID_DOWNLOAD=1
         local end_time=$(date +%s)
         local elapsed=$((end_time - start_time))
-        echo -e "${GREEN}✓ Downloaded ${file} in ${elapsed}s${NC}"
+        log_success "Downloaded ${file} (${elapsed}s)"
     else
         # Fallback to wget if aria2c fails
-        echo -e "${YELLOW}aria2c failed, trying wget...${NC}"
-        if wget --progress=bar:force:noscroll \
+        log_warn "aria2c failed, trying wget..."
+        local wget_flags="--no-verbose"
+        [ "$IS_TTY" = "1" ] && wget_flags="--progress=bar:force:noscroll"
+
+        if wget ${wget_flags} \
             --header="Authorization: Bearer ${HF_TOKEN}" \
             -O "${dst}/${file}" \
             "${url}" 2>&1; then
             DID_DOWNLOAD=1
             local end_time=$(date +%s)
             local elapsed=$((end_time - start_time))
-            echo -e "${GREEN}✓ Downloaded ${file} via wget in ${elapsed}s${NC}"
+            log_success "Downloaded ${file} via wget (${elapsed}s)"
         else
-            echo -e "${RED}✗ Failed to download ${file}${NC}"
+            log_fail "Failed to download ${file}"
             return 1
         fi
     fi
-    echo ""
 }
 
-# Optimized rclone flags for S3/R2 uploads
-# --s3-chunk-size 64M: Larger chunks for multipart upload (better throughput)
-# --s3-upload-concurrency 8: Parallel parts per file upload
-# --fast-list: Reduce API calls
-RCLONE_SYNC_FLAGS="--fast-list --checkers 16 --transfers 16 --s3-chunk-size 64M --s3-upload-concurrency 8 --progress --stats 5s --log-level INFO"
+# TTY-aware rclone sync flags for R2 uploads
+if [ "$IS_TTY" = "1" ]; then
+    RCLONE_SYNC_FLAGS="--fast-list --checkers 16 --transfers 16 --s3-chunk-size 64M --s3-upload-concurrency 8 --progress"
+else
+    RCLONE_SYNC_FLAGS="--fast-list --checkers 16 --transfers 16 --s3-chunk-size 64M --s3-upload-concurrency 8 --stats-one-line --stats 15s -q"
+fi
 
 # Function: Sync models to R2 (run once after HF download)
-# Shows live progress bar directly to terminal
+# TTY-aware output
 sync_to_r2() {
     local start_time=$(date +%s)
 
-    echo ""
-    echo -e "${BLUE}┌─────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${BLUE}│${NC} ${GREEN}Syncing models to R2 for future fast downloads...${NC}"
-    echo -e "${BLUE}│${NC} ${GREEN}Source:${NC} ${COMFYUI_MODELS}"
-    echo -e "${BLUE}│${NC} ${GREEN}Dest:${NC}   r2:${R2_BUCKET}/comfyui/models"
-    echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
+    log "Syncing models to R2 for future fast downloads..."
 
     rclone sync "${COMFYUI_MODELS}" "r2:${R2_BUCKET}/comfyui/models" \
         ${RCLONE_SYNC_FLAGS} 2>&1
 
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
-    echo -e "${GREEN}✓ Models synced to R2 in ${elapsed}s${NC}"
-    echo ""
+    log_success "Models synced to R2 (${elapsed}s)"
 }
 
 # Check if models exist on R2
@@ -657,12 +701,7 @@ echo ""
 # ============================================================
 # 12. MODEL VALIDATION SELF-CHECK
 # ============================================================
-header "Model Validation Self-Check"
-
-# Print rclone version for debugging
-log "Tool versions:"
-echo "  rclone: $(rclone --version 2>/dev/null | head -1 || echo 'not installed')"
-echo "  aria2c: $(aria2c --version 2>/dev/null | head -1 || echo 'not installed')"
+log_phase "Model Validation"
 
 # Required models list
 REQUIRED_MODELS=(
@@ -673,42 +712,36 @@ REQUIRED_MODELS=(
     "${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors"
 )
 
-log "Required model files:"
 MODELS_OK=0
 MODELS_MISSING=0
 for model in "${REQUIRED_MODELS[@]}"; do
     model_name=$(basename "$model")
     if [ -f "$model" ]; then
-        # Get file size in human-readable format
         size=$(ls -lh "$model" 2>/dev/null | awk '{print $5}')
-        echo "  ✓ ${model_name} (${size})"
+        echo -e "  ${GREEN}✓${NC} ${model_name} (${size})"
         MODELS_OK=$((MODELS_OK + 1))
     else
-        echo "  ✗ ${model_name} MISSING"
+        echo -e "  ${RED}✗${NC} ${model_name} MISSING"
         MODELS_MISSING=$((MODELS_MISSING + 1))
     fi
 done
 
-# Directory stats
-log "Model directory stats:"
-for dir in checkpoints vae clip; do
-    dir_path="${COMFYUI_MODELS}/${dir}"
-    if [ -d "$dir_path" ]; then
-        file_count=$(find "$dir_path" -type f -name "*.safetensors" 2>/dev/null | wc -l | tr -d ' ')
-        total_size=$(du -sh "$dir_path" 2>/dev/null | cut -f1)
-        echo "  ${dir}/: ${file_count} files, ${total_size:-0}"
-    else
-        echo "  ${dir}/: directory not found"
-    fi
-done
-
-echo ""
 if [ $MODELS_MISSING -eq 0 ]; then
-    log "✓ All ${MODELS_OK} required models present"
+    log_success "All ${MODELS_OK} required models present"
 else
-    warn "✗ ${MODELS_MISSING} of $((MODELS_OK + MODELS_MISSING)) required models missing!"
+    log_warn "${MODELS_MISSING} of $((MODELS_OK + MODELS_MISSING)) required models missing!"
 fi
-echo ""
+
+# ============================================================
+# STARTUP COMPLETE
+# ============================================================
+log_phase "Startup Complete"
+log_success "Isengard ${SCRIPT_VERSION} ready"
+log "Container will now stay running. Services available:"
+echo "  - API:     http://localhost:8000"
+echo "  - Web GUI: http://localhost:3000"
+echo "  - ComfyUI: http://localhost:8188"
+echo "  - SSH:     port 22"
 
 # Keep container running
 tail -f /dev/null

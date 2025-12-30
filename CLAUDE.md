@@ -393,6 +393,185 @@ git grep -l "old_logging" | xargs sed -i 's/old_logging/logging/g'
 - ❌ Comments like "# OLD VERSION - DO NOT USE" in active code
 - ❌ Imports pointing to files that have "replacement" versions
 
+### 12. Startup Logs – RunPod / Container Best Practices (Mandatory)
+
+> **Startup logs must be clean, readable, and feel live without producing hundreds of duplicated lines.**
+
+Logs are viewed ONLY via RunPod pod logs (container stdout/stderr). No GUI, no browser rendering.
+
+#### Why In-Place Updates Matter
+
+Container log viewers (RunPod, Docker, Kubernetes) capture every line written to stdout. Traditional progress bars that print new lines create:
+- Hundreds of duplicate "progress" entries
+- Unreadable log history
+- Bloated log storage
+- Impossible debugging
+
+**Solution:** Use ANSI escape sequences for single-line updates that overwrite in place.
+
+#### Two Types of Startup Output
+
+| Type | Behavior | Example |
+|------|----------|---------|
+| **Immutable Logs** | Permanent, append-only | `[12:34:56] INFO: Starting Redis...` |
+| **Live Status** | Single line, overwritten | `Downloading: flux1-dev.safetensors [=====>    ] 45% 12.3MB/s` |
+
+**Rule:** Live status lines MUST be overwritten. Immutable logs MUST NOT be overwritten.
+
+#### Safe ANSI Escape Sequences
+
+Only these escapes are safe in container environments:
+
+| Escape | Code | Purpose |
+|--------|------|---------|
+| Carriage Return | `\r` | Return cursor to line start |
+| Clear Line | `\x1b[2K` | Erase entire current line |
+| Colors | `\x1b[32m` etc. | Green, yellow, red, cyan |
+| Reset | `\x1b[0m` | Reset all formatting |
+
+**Forbidden:** Cursor movement (`\x1b[A`, `\x1b[B`), screen clear (`\x1b[2J`), save/restore cursor.
+
+#### TTY Detection and Graceful Degradation
+
+```bash
+# Detect if stdout is a TTY
+if [ -t 1 ]; then
+    IS_TTY=1
+else
+    IS_TTY=0
+fi
+```
+
+| Context | `IS_TTY` | Behavior |
+|---------|----------|----------|
+| Interactive terminal | 1 | Use `\r` for in-place updates |
+| CI/CD, log capture | 0 | Print periodic summary lines only |
+| RunPod logs | Usually 0 | Summary mode (safe) |
+
+#### Color Conventions
+
+| Level | Color | Code | Usage |
+|-------|-------|------|-------|
+| INFO | Green | `\x1b[32m` | Normal operations |
+| WARN | Yellow | `\x1b[33m` | Non-fatal issues |
+| ERROR | Red | `\x1b[31m` | Failures |
+| PHASE | Cyan | `\x1b[36m` | Section headers |
+| BOLD | Bold | `\x1b[1m` | Emphasis |
+
+#### Official Isengard Startup Logging Pattern
+
+Every startup phase follows this exact pattern:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ PHASE START (immutable)                                      │
+│   [HH:MM:SS] ▶ Starting phase: Model Download               │
+├─────────────────────────────────────────────────────────────┤
+│ LIVE STATUS (overwritten in-place, or periodic in non-TTY)  │
+│   Downloading flux1-dev.safetensors... 2.3GB/23GB (10%)     │
+│   Downloading flux1-dev.safetensors... 5.1GB/23GB (22%)     │  ← Same line
+│   Downloading flux1-dev.safetensors... 23GB/23GB (100%)     │  ← Same line
+├─────────────────────────────────────────────────────────────┤
+│ PHASE END (immutable)                                        │
+│   [HH:MM:SS] ✓ Model Download complete (45s)                │
+│   OR                                                        │
+│   [HH:MM:SS] ✗ Model Download failed: connection timeout    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Mandatory Logging Helpers
+
+The startup script MUST define and use these helpers:
+
+```bash
+# TTY detection
+IS_TTY=0; [ -t 1 ] && IS_TTY=1
+
+# Immutable log functions (always print newline)
+log_info()  { echo -e "\x1b[32m[$(date +'%H:%M:%S')]\x1b[0m $1"; }
+log_warn()  { echo -e "\x1b[33m[$(date +'%H:%M:%S')] WARN:\x1b[0m $1"; }
+log_error() { echo -e "\x1b[31m[$(date +'%H:%M:%S')] ERROR:\x1b[0m $1"; }
+log_phase() { echo -e "\n\x1b[36m[$(date +'%H:%M:%S')] ▶ $1\x1b[0m"; }
+
+# Live status (overwrites current line)
+log_status() {
+    if [ "$IS_TTY" = "1" ]; then
+        echo -ne "\x1b[2K\r  $1"
+    fi
+    # Non-TTY: silent (use log_progress for periodic updates)
+}
+
+# Finalize live status line (print newline to preserve final state)
+log_status_done() {
+    if [ "$IS_TTY" = "1" ]; then
+        echo ""  # Newline to preserve the final status
+    fi
+}
+
+# Periodic progress for non-TTY (prints every N seconds)
+log_progress() {
+    local msg="$1"
+    local interval="${2:-10}"  # Default 10 seconds
+    local now=$(date +%s)
+    local last_var="LAST_PROGRESS_${3:-DEFAULT}"
+    local last=${!last_var:-0}
+
+    if [ $((now - last)) -ge $interval ]; then
+        echo -e "  \x1b[90m$msg\x1b[0m"
+        eval "$last_var=$now"
+    fi
+}
+```
+
+#### External Tool Progress Handling
+
+For tools like `rclone`, `aria2c`, `wget` that produce their own progress:
+
+| Tool | Non-TTY Flags | Effect |
+|------|---------------|--------|
+| rclone | `--stats-one-line --stats 10s --quiet` | One summary line every 10s |
+| aria2c | `--summary-interval=10 --console-log-level=warn` | Summary every 10s |
+| wget | `--progress=dot:giga` | One dot per GB |
+| curl | `-s` or `--no-progress-meter` | Silent |
+
+**Pattern for external tools:**
+```bash
+if [ "$IS_TTY" = "1" ]; then
+    # Interactive: show progress
+    rclone copy ... --progress
+else
+    # Non-TTY: minimal output
+    rclone copy ... --stats-one-line --stats 10s -q
+fi
+```
+
+#### Forbidden Patterns
+
+| Pattern | Why It's Wrong |
+|---------|---------------|
+| `echo "Progress: $i%"` in a loop | Creates hundreds of lines |
+| `--progress` without TTY check | Spams logs in containers |
+| `while true; do echo status; done` | Infinite log spam |
+| Spinners without `\r` | Each frame is a new line |
+
+#### Error Handling in Phases
+
+On error, immediately:
+1. Stop any live status updates
+2. Finalize the status line with newline
+3. Print clear ERROR block
+4. Exit with non-zero code
+
+```bash
+phase_failed() {
+    local phase="$1"
+    local reason="$2"
+    log_status_done  # Finalize any live status
+    log_error "Phase '$phase' failed: $reason"
+    exit 1
+}
+```
+
 ---
 
 ## Architecture Overview
