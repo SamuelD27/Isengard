@@ -455,11 +455,12 @@ class AIToolkitPlugin(TrainingPlugin):
         current_step = 0
         current_loss = None
         last_progress_time = time.time()
+        last_emitted_step = -1
         output_buffer = ""
 
         def parse_and_emit_progress(text: str):
             """Parse progress from text and emit callback if progress found."""
-            nonlocal current_step, current_loss, total_steps, last_progress_time
+            nonlocal current_step, current_loss, total_steps, last_progress_time, last_emitted_step
 
             new_step = None
             new_total = None
@@ -573,8 +574,9 @@ class AIToolkitPlugin(TrainingPlugin):
                     if check_samples_for_progress(samples_dir):
                         last_progress_time = time.time()
 
-                # Emit progress callback
-                if progress_callback and current_step > 0:
+                # Emit progress callback only when step changes (prevents duplicates)
+                if progress_callback and current_step > 0 and current_step != last_emitted_step:
+                    last_emitted_step = current_step
                     progress = TrainingProgress(
                         current_step=current_step,
                         total_steps=total_steps,

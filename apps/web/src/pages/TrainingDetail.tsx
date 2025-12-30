@@ -206,25 +206,43 @@ export default function TrainingDetailPage() {
 
     eventSource.addEventListener('progress', (e) => {
       try {
-        const data: ProgressEvent = JSON.parse(e.data)
+        const data = JSON.parse(e.data)
 
-        // Update GPU metrics
-        if (data.gpu) {
-          setGpuMetrics(data.gpu)
+        // Update GPU metrics from flat fields or nested object
+        const gpuData = data.gpu || (data.gpu_utilization !== undefined ? {
+          utilization: parseFloat(data.gpu_utilization) || 0,
+          memory_used: parseFloat(data.gpu_memory_used) || 0,
+          memory_total: parseFloat(data.gpu_memory_total) || 0,
+          temperature: parseFloat(data.gpu_temperature) || 0,
+          power_watts: parseFloat(data.power_watts) || 0,
+        } : null)
+
+        if (gpuData) {
+          setGpuMetrics(gpuData)
         }
 
-        // Update iteration speed from step timing
-        // Note: The job model tracks this now
+        // Extract step info (handles both formats)
+        const currentStep = data.step || data.current_step || 0
+        const totalSteps = data.steps_total || data.total_steps || 0
 
-        // Add log entry for significant events
-        if (data.message && data.step % Math.max(1, Math.floor(data.steps_total / 20)) === 0) {
-          setLogs(prev => [...prev.slice(-500), {
-            timestamp: data.timestamp || new Date().toISOString(),
-            level: 'INFO',
-            message: data.message,
-            event: 'training.progress',
-            fields: { step: data.step, loss: data.loss, lr: data.lr },
-          }])
+        // Add log entry for significant events (every 5% progress)
+        if (data.message && currentStep > 0 && totalSteps > 0) {
+          const interval = Math.max(1, Math.floor(totalSteps / 20))
+          if (currentStep % interval === 0) {
+            setLogs(prev => [...prev.slice(-500), {
+              timestamp: data.timestamp || new Date().toISOString(),
+              level: 'INFO',
+              message: data.message,
+              event: 'training.progress',
+              fields: {
+                step: currentStep,
+                loss: data.loss || data.current_loss,
+                lr: data.lr,
+                iteration_speed: data.iteration_speed,
+                eta_seconds: data.eta_seconds,
+              },
+            }])
+          }
         }
 
         // Check for new sample

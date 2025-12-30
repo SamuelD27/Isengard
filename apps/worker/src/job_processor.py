@@ -8,6 +8,8 @@ M2: Consumes jobs from Redis Streams via XREADGROUP.
 
 import asyncio
 import json
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,39 @@ from packages.plugins.image.src.mock_plugin import MockImagePlugin
 from packages.plugins.image.src.comfyui import ComfyUIPlugin
 
 logger = get_logger("worker.processor")
+
+
+def get_gpu_stats() -> dict | None:
+    """
+    Collect GPU statistics using nvidia-smi.
+
+    Returns dict with: utilization, memory_used, memory_total, temperature, power_watts
+    Returns None if nvidia-smi is not available or fails.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            values = [v.strip() for v in result.stdout.strip().split(",")]
+            if len(values) >= 5:
+                return {
+                    "utilization": float(values[0]),
+                    "memory_used": float(values[1]) / 1024,  # Convert MB to GB
+                    "memory_total": float(values[2]) / 1024,
+                    "temperature": float(values[3]),
+                    "power_watts": float(values[4]) if values[4] != "[N/A]" else 0,
+                }
+    except Exception as e:
+        logger.debug(f"Failed to get GPU stats: {e}")
+    return None
 
 
 class JobProcessor:
@@ -202,32 +237,100 @@ class JobProcessor:
         char_data = await redis_client.get_character(character_id)
         trigger_word = char_data.get("trigger_word", "ohwx person") if char_data else "ohwx person"
 
+        # Track metrics for progress updates
+        start_time = time.time()
+        last_emitted_step = -1
+        last_emit_time = 0.0
+        last_gpu_check_time = 0.0
+        cached_gpu_stats = None
+        MIN_EMIT_INTERVAL = 0.5  # Minimum seconds between progress updates (prevents duplicates)
+        GPU_CHECK_INTERVAL = 5.0  # Check GPU stats every 5 seconds
+
         # Progress callback with Redis publishing
         async def on_progress(progress):
+            nonlocal last_emitted_step, last_emit_time, last_gpu_check_time, cached_gpu_stats
+
+            current_time = time.time()
+
+            # Throttle: Only emit if step changed AND minimum interval passed
+            if (progress.current_step == last_emitted_step and
+                current_time - last_emit_time < MIN_EMIT_INTERVAL):
+                return
+
+            last_emitted_step = progress.current_step
+            last_emit_time = current_time
+
+            # Calculate all metrics
+            elapsed_seconds = current_time - start_time
             percentage = (progress.current_step / total_steps) * 100 if total_steps > 0 else 0
+
+            # Calculate iteration speed and ETA
+            iteration_speed = 0.0
+            eta_seconds = 0
+            if progress.current_step > 0 and elapsed_seconds > 0:
+                iteration_speed = progress.current_step / elapsed_seconds  # steps/sec
+                remaining_steps = total_steps - progress.current_step
+                if iteration_speed > 0:
+                    eta_seconds = int(remaining_steps / iteration_speed)
+
+            # Periodically refresh GPU stats
+            if current_time - last_gpu_check_time >= GPU_CHECK_INTERVAL:
+                cached_gpu_stats = get_gpu_stats()
+                last_gpu_check_time = current_time
+
             # Update job record so polling gets latest progress
-            await redis_client.update_job_status(
-                job_id=job_id,
-                status="running",
-                progress=percentage,
-                current_step=progress.current_step,
-                total_steps=total_steps,
-            )
-            # Also publish to stream for SSE listeners
-            await redis_client.publish_progress(
-                job_id=job_id,
-                status="running",
-                progress=percentage,
-                message=f"Step {progress.current_step}/{total_steps}",
-                correlation_id=correlation_id,
-                current_step=progress.current_step,
-                total_steps=total_steps,
-                loss=progress.loss or 0,
-            )
+            update_fields = {
+                "status": "running",
+                "progress": percentage,
+                "current_step": progress.current_step,
+                "total_steps": total_steps,
+                "current_loss": progress.loss,
+                "elapsed_seconds": int(elapsed_seconds),
+                "eta_seconds": eta_seconds,
+                "iteration_speed": round(iteration_speed, 3),
+            }
+            if cached_gpu_stats:
+                update_fields["gpu_utilization"] = cached_gpu_stats.get("utilization")
+                update_fields["gpu_memory_used"] = cached_gpu_stats.get("memory_used")
+                update_fields["gpu_memory_total"] = cached_gpu_stats.get("memory_total")
+                update_fields["gpu_temperature"] = cached_gpu_stats.get("temperature")
+
+            await redis_client.update_job_status(job_id=job_id, **update_fields)
+
+            # Build message with metrics
+            speed_str = f"{iteration_speed:.2f} it/s" if iteration_speed > 0 else "calculating..."
+            eta_str = f"{eta_seconds // 60}m {eta_seconds % 60}s" if eta_seconds > 0 else "calculating..."
+            loss_str = f"{progress.loss:.4f}" if progress.loss else "--"
+            message = f"Step {progress.current_step}/{total_steps} | Loss: {loss_str} | Speed: {speed_str} | ETA: {eta_str}"
+
+            # Publish to stream for SSE listeners
+            progress_data = {
+                "job_id": job_id,
+                "status": "running",
+                "progress": percentage,
+                "message": message,
+                "correlation_id": correlation_id,
+                "current_step": progress.current_step,
+                "total_steps": total_steps,
+                "loss": progress.loss or 0,
+                "elapsed_seconds": int(elapsed_seconds),
+                "eta_seconds": eta_seconds,
+                "iteration_speed": round(iteration_speed, 3),
+            }
+            if cached_gpu_stats:
+                progress_data["gpu_utilization"] = cached_gpu_stats.get("utilization")
+                progress_data["gpu_memory_used"] = cached_gpu_stats.get("memory_used")
+                progress_data["gpu_memory_total"] = cached_gpu_stats.get("memory_total")
+                progress_data["gpu_temperature"] = cached_gpu_stats.get("temperature")
+
+            await redis_client.publish_progress(**progress_data)
+
             logger.debug(f"Training progress: {percentage:.1f}%", extra={
                 "step": progress.current_step,
                 "total": total_steps,
                 "loss": progress.loss,
+                "iteration_speed": iteration_speed,
+                "eta_seconds": eta_seconds,
             })
 
         # Run training
