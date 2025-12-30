@@ -1,12 +1,12 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Wand2, ChevronDown, ChevronUp, Image, Settings2, Sparkles, Maximize2, Smile, ArrowUpRight, Loader2, Download, RefreshCw, AlertCircle } from 'lucide-react'
+import { Wand2, ChevronDown, ChevronUp, Image, Settings2, Sparkles, Maximize2, Smile, ArrowUpRight, Loader2, Download, RefreshCw, AlertCircle, Upload, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Progress } from '@/components/ui/progress'
-import { api, GenerationConfig, GenerationJob, ImageCapabilities } from '@/lib/api'
+import { api, GenerationConfig, GenerationJob, ImageCapabilities, LoraInfo } from '@/lib/api'
 
 // Aspect ratio presets
 const ASPECT_RATIOS = [
@@ -50,10 +50,20 @@ export default function ImageGenPage() {
   const [selectedAspect, setSelectedAspect] = useState(0)
   const [selectedQuality, setSelectedQuality] = useState(1)
   const [selectedJob, setSelectedJob] = useState<string | null>(null)
+  const [showLoraUpload, setShowLoraUpload] = useState(false)
+  const [loraUploadName, setLoraUploadName] = useState('')
+  const [loraUploadTrigger, setLoraUploadTrigger] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { data: characters = [] } = useQuery({
     queryKey: ['characters'],
     queryFn: api.listCharacters,
+  })
+
+  // Fetch uploaded LoRAs
+  const { data: lorasData } = useQuery({
+    queryKey: ['uploaded-loras'],
+    queryFn: api.listLoras,
   })
 
   const { data: apiInfo } = useQuery({
@@ -79,6 +89,48 @@ export default function ImageGenPage() {
       setSelectedJob(job.id)
     },
   })
+
+  const uploadLoraMutation = useMutation({
+    mutationFn: ({ file, name, triggerWord }: { file: File; name: string; triggerWord?: string }) =>
+      api.uploadLora(file, name, triggerWord),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['uploaded-loras'] })
+      setShowLoraUpload(false)
+      setLoraUploadName('')
+      setLoraUploadTrigger('')
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    },
+  })
+
+  const deleteLoraMutation = useMutation({
+    mutationFn: api.deleteLora,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['uploaded-loras'] })
+    },
+  })
+
+  const handleLoraFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      // Auto-fill name from filename if empty
+      if (!loraUploadName) {
+        setLoraUploadName(file.name.replace('.safetensors', ''))
+      }
+    }
+  }
+
+  const handleLoraUpload = () => {
+    const file = fileInputRef.current?.files?.[0]
+    if (file && loraUploadName) {
+      uploadLoraMutation.mutate({
+        file,
+        name: loraUploadName,
+        triggerWord: loraUploadTrigger || undefined,
+      })
+    }
+  }
+
+  const uploadedLoras = lorasData?.loras || []
 
   const handleAspectChange = (index: number) => {
     setSelectedAspect(index)
@@ -111,6 +163,12 @@ export default function ImageGenPage() {
   const trainedCharacters = characters.filter((c: { lora_path: string | null }) => c.lora_path)
   const selectedChar = characters.find((c: { id: string }) => c.id === config.lora_id)
 
+  // Get selected LoRA info (character or uploaded)
+  const selectedLora = config.lora_id?.startsWith('uploaded:')
+    ? uploadedLoras.find((l: LoraInfo) => `uploaded:${l.id}` === config.lora_id)
+    : null
+  const selectedTriggerWord = selectedChar?.trigger_word || selectedLora?.trigger_word
+
   // Get currently selected job details
   const currentJob = jobs.find((j: GenerationJob) => j.id === selectedJob)
 
@@ -142,33 +200,140 @@ export default function ImageGenPage() {
                   value={config.prompt}
                   onChange={(e) => setConfig({ ...config, prompt: e.target.value })}
                 />
-                {selectedChar && (
+                {selectedTriggerWord && (
                   <p className="text-xs text-muted-foreground">
-                    Include trigger word: <code className="text-accent">{(selectedChar as { trigger_word: string }).trigger_word}</code>
+                    Include trigger word: <code className="text-accent">{selectedTriggerWord}</code>
                   </p>
                 )}
               </div>
 
               {/* LoRA Selection */}
-              <div className="space-y-2">
-                <Label>Character LoRA</Label>
-                {trainedCharacters.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-1">
-                    No trained LoRAs available
-                  </p>
-                ) : (
-                  <select
-                    className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
-                    value={config.lora_id || ''}
-                    onChange={(e) => setConfig({ ...config, lora_id: e.target.value || null })}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label>LoRA Model</Label>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowLoraUpload(!showLoraUpload)}
+                    className="h-7 text-xs"
                   >
-                    <option value="">Base model only</option>
-                    {trainedCharacters.map((char: { id: string; name: string; trigger_word: string }) => (
-                      <option key={char.id} value={char.id}>
-                        {char.name} ({char.trigger_word})
-                      </option>
-                    ))}
-                  </select>
+                    <Upload className="h-3 w-3 mr-1" />
+                    Upload LoRA
+                  </Button>
+                </div>
+
+                {/* LoRA Upload Panel */}
+                {showLoraUpload && (
+                  <div className="p-3 rounded-md border border-border bg-muted/30 space-y-3">
+                    <div className="space-y-2">
+                      <Label className="text-xs">LoRA File (.safetensors)</Label>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".safetensors"
+                        onChange={handleLoraFileSelect}
+                        className="text-xs w-full"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-xs">Name *</Label>
+                        <Input
+                          value={loraUploadName}
+                          onChange={(e) => setLoraUploadName(e.target.value)}
+                          placeholder="My LoRA"
+                          className="h-8 text-sm"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Trigger Word</Label>
+                        <Input
+                          value={loraUploadTrigger}
+                          onChange={(e) => setLoraUploadTrigger(e.target.value)}
+                          placeholder="ohwx"
+                          className="h-8 text-sm"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        onClick={handleLoraUpload}
+                        disabled={!fileInputRef.current?.files?.[0] || !loraUploadName || uploadLoraMutation.isPending}
+                        className="flex-1"
+                      >
+                        {uploadLoraMutation.isPending ? (
+                          <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                        ) : (
+                          <Upload className="h-3 w-3 mr-1" />
+                        )}
+                        Upload
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowLoraUpload(false)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                    {uploadLoraMutation.error && (
+                      <p className="text-xs text-destructive">
+                        {(uploadLoraMutation.error as Error).message}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* LoRA Dropdown */}
+                <select
+                  className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
+                  value={config.lora_id || ''}
+                  onChange={(e) => setConfig({ ...config, lora_id: e.target.value || null })}
+                >
+                  <option value="">Base model only</option>
+                  {trainedCharacters.length > 0 && (
+                    <optgroup label="Trained Characters">
+                      {trainedCharacters.map((char: { id: string; name: string; trigger_word: string }) => (
+                        <option key={char.id} value={char.id}>
+                          {char.name} ({char.trigger_word})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {uploadedLoras.length > 0 && (
+                    <optgroup label="Uploaded LoRAs">
+                      {uploadedLoras.map((lora: LoraInfo) => (
+                        <option key={lora.id} value={`uploaded:${lora.id}`}>
+                          {lora.name} {lora.trigger_word ? `(${lora.trigger_word})` : ''}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+
+                {/* Uploaded LoRAs List */}
+                {uploadedLoras.length > 0 && (
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">Uploaded LoRAs</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {uploadedLoras.map((lora: LoraInfo) => (
+                        <div
+                          key={lora.id}
+                          className="flex items-center gap-1 text-xs bg-muted rounded px-2 py-1"
+                        >
+                          <span>{lora.name}</span>
+                          <button
+                            onClick={() => deleteLoraMutation.mutate(lora.id)}
+                            className="text-muted-foreground hover:text-destructive"
+                            title="Delete LoRA"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
 

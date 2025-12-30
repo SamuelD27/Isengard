@@ -344,7 +344,21 @@ async def list_successful_training_jobs(character_id: str = None):
     Convenience endpoint for the training history view.
     """
     jobs = await _list_jobs(character_id)
-    return [j for j in jobs if j.status == JobStatus.COMPLETED]
+
+    # Filter for completed jobs - handle both enum and string values
+    completed_jobs = []
+    for job in jobs:
+        status_value = job.status.value if hasattr(job.status, 'value') else str(job.status)
+        if status_value == "completed":
+            completed_jobs.append(job)
+
+    logger.debug(f"Found {len(completed_jobs)} completed jobs out of {len(jobs)} total", extra={
+        "event": "jobs.list_successful",
+        "total_jobs": len(jobs),
+        "completed_jobs": len(completed_jobs),
+    })
+
+    return completed_jobs
 
 
 @router.get("/ongoing", response_model=list[TrainingJob])

@@ -23,6 +23,7 @@ from packages.shared.src.types import (
     GenerationJob,
     TrainingConfig,
     GenerationConfig,
+    Character,
 )
 from packages.shared.src import redis_client
 
@@ -35,6 +36,50 @@ from packages.plugins.image.src.mock_plugin import MockImagePlugin
 from packages.plugins.image.src.comfyui import ComfyUIPlugin
 
 logger = get_logger("worker.processor")
+
+
+async def update_character_lora(character_id: str, lora_path: str) -> bool:
+    """
+    Update character record with trained LoRA path.
+
+    Characters are stored on filesystem, not Redis.
+    This function updates the character JSON file directly.
+
+    Returns True if successful, False otherwise.
+    """
+    try:
+        config = get_global_config()
+        char_path = config.characters_dir / f"{character_id}.json"
+
+        if not char_path.exists():
+            logger.error(f"Character file not found: {char_path}")
+            return False
+
+        # Load existing character data
+        char_data = json.loads(char_path.read_text())
+
+        # Update LoRA fields
+        char_data["lora_path"] = lora_path
+        char_data["lora_trained_at"] = datetime.now(timezone.utc).isoformat()
+        char_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Save back to filesystem
+        char_path.write_text(json.dumps(char_data, indent=2))
+
+        logger.info("Character updated with LoRA path", extra={
+            "event": "character.lora_updated",
+            "character_id": character_id,
+            "lora_path": lora_path,
+        })
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to update character LoRA: {e}", extra={
+            "event": "character.lora_update_failed",
+            "character_id": character_id,
+            "error": str(e),
+        })
+        return False
 
 
 def get_gpu_stats() -> dict | None:
@@ -350,6 +395,10 @@ class JobProcessor:
                 "output_path": str(result.output_path),
                 "training_time": result.training_time_seconds,
             })
+
+            # Update character record with LoRA path
+            await update_character_lora(character_id, str(result.output_path))
+
             await self._mark_job_completed(
                 job_id,
                 str(result.output_path),

@@ -49,7 +49,51 @@ from packages.plugins.image import get_image_plugin, register_image_plugin
 from packages.plugins.image.src.mock_plugin import MockImagePlugin
 from packages.plugins.image.src.interface import GenerationProgress
 
+from packages.shared.src.types import Character
+
 logger = get_logger("api.services.job_executor")
+
+
+def _update_character_lora(character_id: str, lora_path: str) -> bool:
+    """
+    Update character record with trained LoRA path.
+
+    For M1 mode, characters are stored on filesystem.
+    This function updates the character JSON file directly.
+    """
+    try:
+        config = get_global_config()
+        char_path = config.characters_dir / f"{character_id}.json"
+
+        if not char_path.exists():
+            logger.error(f"Character file not found: {char_path}")
+            return False
+
+        # Load existing character data
+        char_data = json.loads(char_path.read_text())
+
+        # Update LoRA fields
+        char_data["lora_path"] = lora_path
+        char_data["lora_trained_at"] = datetime.now(timezone.utc).isoformat()
+        char_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Save back to filesystem
+        char_path.write_text(json.dumps(char_data, indent=2))
+
+        logger.info("Character updated with LoRA path", extra={
+            "event": "character.lora_updated",
+            "character_id": character_id,
+            "lora_path": lora_path,
+        })
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to update character LoRA: {e}", extra={
+            "event": "character.lora_update_failed",
+            "character_id": character_id,
+            "error": str(e),
+        })
+        return False
 
 # Track registered plugins
 _plugins_initialized = False
@@ -332,6 +376,9 @@ async def execute_training_job(
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
             config_path.write_text(json.dumps(config_data, indent=2))
+
+            # Update character record with LoRA path
+            _update_character_lora(job.character_id, str(output_path))
 
             # Mark completed
             job.status = JobStatus.COMPLETED

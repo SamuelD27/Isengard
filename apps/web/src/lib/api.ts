@@ -270,6 +270,16 @@ export interface GenerationJob {
 }
 
 // Dataset types
+export interface LoraInfo {
+  id: string
+  name: string
+  filename: string
+  trigger_word: string | null
+  size_bytes: number
+  uploaded_at: string
+  path: string
+}
+
 export interface DatasetImage {
   id: string
   filename: string
@@ -465,4 +475,25 @@ export const api = {
 
   // Job Logs
   getJobLogUrl: (jobId: string) => `${API_BASE}/jobs/${jobId}/logs`,
+
+  // LoRAs
+  listLoras: () => apiRequest<{ loras: LoraInfo[]; total_count: number }>('/loras'),
+  uploadLora: async (file: File, name: string, triggerWord?: string) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('name', name)
+    if (triggerWord) formData.append('trigger_word', triggerWord)
+
+    const response = await fetch(`${API_BASE}/loras/upload`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }))
+      throw new Error(error.detail || 'Failed to upload LoRA')
+    }
+    return response.json() as Promise<LoraInfo>
+  },
+  deleteLora: (loraId: string) =>
+    apiRequest<{ status: string; id: string }>(`/loras/${loraId}`, { method: 'DELETE' }),
 }

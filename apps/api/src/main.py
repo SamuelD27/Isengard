@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import configure_logging, get_logger
 
-from .routes import health, characters, training, generation, logs, jobs, uelr
+from .routes import health, characters, training, generation, logs, jobs, uelr, loras
 from .middleware import CorrelationIDMiddleware
 
 logger = get_logger("api.main")
@@ -107,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(characters.router, prefix="/api/characters", tags=["Characters"])
     app.include_router(training.router, prefix="/api/training", tags=["Training"])
     app.include_router(generation.router, prefix="/api/generation", tags=["Generation"])
+    app.include_router(loras.router, prefix="/api/loras", tags=["LoRAs"])
     app.include_router(logs.router, prefix="/api/client-logs", tags=["Client Logs"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
     app.include_router(uelr.router, prefix="/api/uelr", tags=["UELR"])
