@@ -176,7 +176,7 @@ COPY start.sh /start.sh
 COPY deploy/runpod/secrets.sh /secrets.sh
 
 # Create version marker for verification
-RUN echo "BOOTSTRAP_VERSION=v2.3.0-clean-logs BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
+RUN echo "BOOTSTRAP_VERSION=v2.3.1-no-ansi BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
     && sha256sum /start.sh >> /app/BOOTSTRAP_VERSION
 
 # Copy helper scripts for pod management

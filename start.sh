@@ -48,15 +48,28 @@ HF_CACHE="${VOLUME_ROOT}/cache/huggingface"
 # Detect if stdout is a TTY (interactive terminal)
 IS_TTY=0; [ -t 1 ] && IS_TTY=1
 
-# Colors (ANSI escape codes)
-RED='\x1b[31m'
-GREEN='\x1b[32m'
-YELLOW='\x1b[33m'
-BLUE='\x1b[34m'
-CYAN='\x1b[36m'
-GRAY='\x1b[90m'
-BOLD='\x1b[1m'
-NC='\x1b[0m'  # No Color / Reset
+# Colors - ONLY when stdout is a TTY
+# RunPod logs don't render ANSI, so we output plain text there
+if [ "$IS_TTY" = "1" ]; then
+    RED='\x1b[31m'
+    GREEN='\x1b[32m'
+    YELLOW='\x1b[33m'
+    BLUE='\x1b[34m'
+    CYAN='\x1b[36m'
+    GRAY='\x1b[90m'
+    BOLD='\x1b[1m'
+    NC='\x1b[0m'
+else
+    # No colors for non-TTY (container logs)
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    GRAY=''
+    BOLD=''
+    NC=''
+fi
 
 # Immutable log functions (always print newline, permanent in logs)
 log() { echo -e "${GREEN}[$(date +'%H:%M:%S')]${NC} $1"; }
@@ -85,8 +98,8 @@ log_status_done() {
 }
 
 # Phase completion markers
-log_success() { echo -e "${GREEN}[$(date +'%H:%M:%S')] ✓ $1${NC}"; }
-log_fail() { echo -e "${RED}[$(date +'%H:%M:%S')] ✗ $1${NC}"; }
+log_success() { echo -e "${GREEN}[$(date +'%H:%M:%S')] ✓${NC} $1"; }
+log_fail() { echo -e "${RED}[$(date +'%H:%M:%S')] ✗${NC} $1"; }
 
 # Progress tracking for non-TTY (prints every N seconds)
 declare -A LAST_PROGRESS_TIME
@@ -98,7 +111,7 @@ log_progress() {
     local last="${LAST_PROGRESS_TIME[$key]:-0}"
 
     if [ $((now - last)) -ge $interval ]; then
-        echo -e "  ${GRAY}$msg${NC}"
+        echo "  $msg"
         LAST_PROGRESS_TIME[$key]=$now
     fi
 }
@@ -115,35 +128,42 @@ phase_failed() {
 # ============================================================
 # STARTUP BANNER
 # ============================================================
-SCRIPT_VERSION="v2.3.0-clean-logs"
+SCRIPT_VERSION="v2.3.1-no-ansi"
 BUILD_DATE="2025-12-30"
 
 # Generate SHA256 of this script for verification
 SCRIPT_SHA=$(sha256sum /start.sh 2>/dev/null | cut -c1-12 || echo "unknown")
 
+# Banner - simplified for container logs, fancy for TTY
 echo ""
-echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║${NC}                                                            ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}██╗███████╗███████╗███╗   ██╗ ██████╗  █████╗ ██████╗ ██████╗${NC}  ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}██║██╔════╝██╔════╝████╗  ██║██╔════╝ ██╔══██╗██╔══██╗██╔══██╗${NC} ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}██║███████╗█████╗  ██╔██╗ ██║██║  ███╗███████║██████╔╝██║  ██║${NC} ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}██║╚════██║██╔══╝  ██║╚██╗██║██║   ██║██╔══██║██╔══██╗██║  ██║${NC} ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}██║███████║███████╗██║ ╚████║╚██████╔╝██║  ██║██║  ██║██████╔╝${NC} ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   ${GREEN}╚═╝╚══════╝╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝${NC}  ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}                                                            ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   Script Version: ${GREEN}${SCRIPT_VERSION}${NC}                        ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   Build Date:     ${GREEN}${BUILD_DATE}${NC}                                  ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   Script SHA256:  ${GREEN}${SCRIPT_SHA}${NC}                              ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}                                                            ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}   Features:                                                ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} SSH access on TCP port 22                           ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} Fast parallel model downloads with live progress    ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} nginx reverse proxy (port 3000 → API 8000)          ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} AI-Toolkit isolated venv                            ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} SSE streaming support                               ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}     ${GREEN}✓${NC} Persistent volume storage                           ${BLUE}║${NC}"
-echo -e "${BLUE}║${NC}                                                            ${BLUE}║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+if [ "$IS_TTY" = "1" ]; then
+    # Full ASCII art banner for interactive terminals
+    echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}   ${GREEN}██╗███████╗███████╗███╗   ██╗ ██████╗  █████╗ ██████╗ ██████╗${NC}  ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${GREEN}██║██╔════╝██╔════╝████╗  ██║██╔════╝ ██╔══██╗██╔══██╗██╔══██╗${NC} ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${GREEN}██║███████╗█████╗  ██╔██╗ ██║██║  ███╗███████║██████╔╝██║  ██║${NC} ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${GREEN}██║╚════██║██╔══╝  ██║╚██╗██║██║   ██║██╔══██║██╔══██╗██║  ██║${NC} ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${GREEN}██║███████║███████╗██║ ╚████║╚██████╔╝██║  ██║██║  ██║██████╔╝${NC} ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${GREEN}╚═╝╚══════╝╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝${NC}  ${BLUE}║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+else
+    # Clean text banner for container logs
+    echo "============================================================"
+    echo "  ISENGARD - Identity LoRA Training Platform"
+    echo "============================================================"
+fi
+echo ""
+echo "  Version: ${SCRIPT_VERSION}"
+echo "  Build:   ${BUILD_DATE}"
+echo "  SHA256:  ${SCRIPT_SHA}"
+echo ""
+echo "  Features:"
+echo "    - SSH access on TCP port 22"
+echo "    - Fast parallel model downloads"
+echo "    - nginx reverse proxy (port 3000 -> API 8000)"
+echo "    - AI-Toolkit isolated venv"
+echo "    - SSE streaming support"
+echo "    - Persistent volume storage"
 echo ""
 
 # ============================================================
