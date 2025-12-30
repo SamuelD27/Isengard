@@ -340,6 +340,7 @@ class JobProcessor:
             output_path=output_path,
             trigger_word=trigger_word,
             progress_callback=on_progress,
+            job_id=job_id,
         )
 
         if result.success:

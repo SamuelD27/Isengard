@@ -46,6 +46,7 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { LossChart } from '@/components/training/LossChart'
 import { api, Character, GPUMetrics } from '@/lib/api'
 
 interface LogEntry {
@@ -107,6 +108,8 @@ export default function TrainingDetailPage() {
   const [selectedSample, setSelectedSample] = useState<SampleImage | null>(null)
   const [gpuMetrics, setGpuMetrics] = useState<GPUMetrics | null>(null)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [lossHistory, setLossHistory] = useState<{ step: number; loss: number }[]>([])
+  const [autoScroll, setAutoScroll] = useState(true)
 
   const logsEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -224,25 +227,43 @@ export default function TrainingDetailPage() {
         // Extract step info (handles both formats)
         const currentStep = data.step || data.current_step || 0
         const totalSteps = data.steps_total || data.total_steps || 0
+        const currentLoss = data.loss || data.current_loss
 
-        // Add log entry for significant events (every 5% progress)
-        if (data.message && currentStep > 0 && totalSteps > 0) {
-          const interval = Math.max(1, Math.floor(totalSteps / 20))
-          if (currentStep % interval === 0) {
-            setLogs(prev => [...prev.slice(-500), {
+        // Update loss history for chart
+        if (currentStep > 0 && currentLoss !== undefined && currentLoss !== null) {
+          setLossHistory(prev => {
+            // Only add if step is new (avoid duplicates)
+            if (prev.length === 0 || prev[prev.length - 1].step < currentStep) {
+              const newHistory = [...prev, { step: currentStep, loss: currentLoss }]
+              // Keep last 500 points to avoid memory issues
+              return newHistory.slice(-500)
+            }
+            return prev
+          })
+        }
+
+        // Add log entry for every step with progress info
+        if (data.message && currentStep > 0) {
+          setLogs(prev => {
+            // Avoid duplicate entries for same step
+            const lastLog = prev[prev.length - 1]
+            if (lastLog?.fields?.step === currentStep) {
+              return prev
+            }
+            return [...prev.slice(-500), {
               timestamp: data.timestamp || new Date().toISOString(),
               level: 'INFO',
               message: data.message,
               event: 'training.progress',
               fields: {
                 step: currentStep,
-                loss: data.loss || data.current_loss,
+                loss: currentLoss,
                 lr: data.lr,
                 iteration_speed: data.iteration_speed,
                 eta_seconds: data.eta_seconds,
               },
-            }])
-          }
+            }]
+          })
         }
 
         // Check for new sample
@@ -278,10 +299,12 @@ export default function TrainingDetailPage() {
     }
   }, [jobId, isActive, queryClient, refetchArtifacts, refetchLogs])
 
-  // Auto-scroll logs
+  // Auto-scroll logs when enabled
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [logs])
+    if (autoScroll) {
+      logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [logs, autoScroll])
 
   // Copy job ID
   const copyJobId = useCallback(() => {
@@ -612,15 +635,31 @@ export default function TrainingDetailPage() {
             </Card>
           )}
 
+          {/* Loss Chart */}
+          <LossChart
+            data={lossHistory}
+            currentStep={job.current_step}
+            totalSteps={job.total_steps}
+          />
+
           {/* Logs */}
           <Card className="flex-1">
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm flex items-center gap-2">
                   <Terminal className="h-4 w-4" />
-                  Logs
+                  Logs ({filteredLogs.length})
                 </CardTitle>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={autoScroll}
+                      onChange={(e) => setAutoScroll(e.target.checked)}
+                      className="w-3 h-3 rounded"
+                    />
+                    Auto-scroll
+                  </label>
                   <select
                     className="text-xs bg-input border border-border rounded px-2 py-1"
                     value={logFilter}

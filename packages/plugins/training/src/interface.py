@@ -129,6 +129,7 @@ class TrainingPlugin(ABC):
         output_path: Path,
         trigger_word: str,
         progress_callback: Callable[[TrainingProgress], None] | None = None,
+        job_id: str | None = None,
     ) -> TrainingResult:
         """
         Execute training run.
@@ -139,6 +140,7 @@ class TrainingPlugin(ABC):
             output_path: Path where trained model should be saved
             trigger_word: Trigger word for the identity
             progress_callback: Optional callback for progress updates
+            job_id: Optional job ID for organizing sample images
 
         Returns:
             TrainingResult with success status and output path

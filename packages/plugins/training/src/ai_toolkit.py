@@ -294,6 +294,7 @@ class AIToolkitPlugin(TrainingPlugin):
         output_path: Path,
         trigger_word: str,
         progress_callback: Callable[[TrainingProgress], None] | None = None,
+        job_id: str | None = None,
     ) -> TrainingResult:
         """
         Execute AI-Toolkit LoRA training.
@@ -305,6 +306,14 @@ class AIToolkitPlugin(TrainingPlugin):
         4. Parse progress from stdout
         5. Handle cancellation via SIGTERM
         6. Move output to expected path
+
+        Args:
+            config: Training configuration
+            images_dir: Directory containing training images
+            output_path: Path where trained model should be saved
+            trigger_word: Trigger word for the identity
+            progress_callback: Optional callback for progress updates
+            job_id: Optional job ID for organizing sample images (unused in AI-Toolkit)
         """
         self._cancelled = False
         start_time = time.time()
