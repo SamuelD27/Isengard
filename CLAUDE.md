@@ -1,1424 +1,182 @@
 # Isengard - Project Intelligence
 
-> Identity LoRA Training + ComfyUI Image Generation + Video Pipeline (Scaffold)
-
----
+> Identity LoRA Training + ComfyUI Image Generation Platform
 
 ## Mission
 
-Isengard is a **GUI-first platform** for creating personalized AI-generated content. Non-technical users should be able to train identity LoRAs from their photos and generate high-quality images without touching a command line.
+GUI-first platform for personalized AI-generated content. Non-technical users train identity LoRAs from photos and generate images without command line.
 
 ---
 
-## Architectural Guardrails (Locked)
+## Architecture
 
-> **These patterns are working. Do not deviate without explicit justification.**
-
-### Separation of Concerns (Mandatory)
 ```
 React UI (apps/web) ⇄ FastAPI API (apps/api) ⇄ Worker (apps/worker) ⇄ Plugins (packages/plugins)
 ```
-- Frontend ONLY talks to API via HTTP/SSE
+
+- Frontend talks to API via HTTP/SSE only
 - API queues jobs to Redis; Worker consumes them
-- Plugins are loaded by Worker, never imported directly by API
-
-### Plugin Architecture (Mandatory)
-- Training/Image/Video backends are **swappable modules** with stable interfaces
-- Each plugin lives in `packages/plugins/{type}/src/` with `interface.py` defining the contract
-- NO monolithic scripts; NO hardcoded AI logic in route handlers
-- Adding a new backend = implement interface + register in plugin registry
-
-### Persistent Storage (Mandatory)
-- Heavy artifacts (models, outputs, uploads) → `VOLUME_ROOT` (`/runpod-volume/isengard`)
-- Container filesystem = ephemeral caches only
-- Path resolution via `packages/shared/src/config.py`, never hardcoded
-
-### Fast-Test vs Production Modes (Mandatory)
-- `ISENGARD_MODE=fast-test` → Mock plugins, no GPU, for CI/UI testing
-- `ISENGARD_MODE=production` → Real AI-Toolkit + ComfyUI
-- Both modes MUST work; tests run in fast-test, prod deploys in production
-
-### Workflow Templates (Mandatory)
-- ComfyUI graphs live in `packages/plugins/image/workflows/*.json`
-- Workflows are versioned, named files (e.g., `flux-dev-lora.json`)
-- NO inline workflow construction in random code paths
-- Template placeholders replaced at runtime by `comfyui.py`
-
-### UX Philosophy (Mandatory)
-- GUI-first: every feature accessible through web UI
-- Progressive disclosure: presets visible, advanced settings collapsed
-- Minimal dark theme, professional aesthetic
-- Pages: Characters → Dataset → Training → Generate (+ Video scaffold)
-- Real-time feedback: SSE for progress, staging workflows for review
-
-### Quality Discipline (Mandatory)
-- Fix root causes, not symptoms
-- Never disable features to make tests pass
-- Add logging/tests when fixing bugs
-- If it's broken, mark entire feature as not-ready rather than ship broken
-
----
-
-## Implemented Features (Do Not Regress)
-
-> **These features are working in production. Any PR that breaks them is rejected.**
-
-### Character Management
-- [x] Inline image upload during character creation (not post-creation only)
-- [x] Character detail view with image preview grid
-- [x] Individual image deletion with confirmation
-- [x] Trigger word display and copy
-
-### Dataset Manager
-- [x] Global image grid across all characters
-- [x] Search by filename or character name
-- [x] Filter by character dropdown
-- [x] Multi-select with visual checkboxes
-- [x] Bulk delete with confirmation dialog
-
-### Training System
-- [x] Training presets (Quick/Balanced/High Quality)
-- [x] Advanced parameters (optimizer, scheduler, precision, batch size)
-- [x] SSE live log streaming with auto-scroll
-- [x] Job history with config summary display
-- [x] Estimated training time calculation
-
-### Image Generation
-- [x] 7 aspect ratio presets with dimension calculation
-- [x] Quality tiers (Draft/Standard/High Quality)
-- [x] Advanced toggles (ControlNet, IP-Adapter, FaceDetailer, Upscale)
-- [x] LoRA selection from trained characters
-- [x] Output gallery for completed jobs
-
-### Synthetic Generation
-- [x] Generate button visible only for trained characters
-- [x] Staging area with Keep/Discard workflow
-- [x] Batch generation (1/2/4/8 images)
-- [x] Auto-save kept images to training dataset
-
-### FLUX Workflows
-- [x] Disaggregated loader pattern: `UNETLoader` + `DualCLIPLoader` + `VAELoader`
-- [x] Symlinks from checkpoints → unet folder for FLUX compatibility
-- [x] Four workflow variants: schnell, dev, schnell-lora, dev-lora
-- [x] LoraLoaderModelOnly for trained character LoRAs
-
----
-
-## Non-Negotiables
-
-These rules are **absolute** and override any convenience shortcuts:
-
-### 1. GUI-First, Refined UX
-- Every feature must be usable through the web interface
-- Progressive disclosure: simple defaults, advanced options hidden until needed
-- Clear tooltips and explanations for technical parameters
-- Real-time feedback for long-running operations (training, generation)
-
-### 2. Plugin Architecture - No Monoliths
-- Training backends, image pipelines, and video pipelines are **swappable modules**
-- Each plugin implements a stable interface defined in `packages/plugins/*/interface.py`
-- Core application code NEVER imports plugin internals directly
-- Adding a new training backend should require only implementing the interface + config
-
-### 3. Persistent Storage Correctness
-| Environment | Location | Purpose |
-|-------------|----------|---------|
-| Local Dev | `./data/uploads/` | User-uploaded training images |
-| Local Dev | `./data/models/` | Trained LoRA models |
-| Local Dev | `./data/outputs/` | Generated images/videos |
-| Local Dev | `./logs/` | Observability logs (persisted) |
-| Local Dev | `./tmp/` | Ephemeral scratch space |
-| RunPod | `/runpod-volume/` or `/workspace/` | ALL persistent data |
-| RunPod | Container filesystem | Ephemeral only |
-
-**Rule:** Never assume local paths exist in production. Use environment-based path resolution.
-
-### 4. Observability First
-- Structured JSON logging is **mandatory** from day 1
-- Every request has a correlation ID propagated through the entire stack
-- Logging is not optional, not "added later"
-- See [Observability Standard](#observability-standard) for details
-
-### 5. No "Give Up" Fixes
-- Failing tests must be fixed at the root cause
-- Never disable/skip features to make tests pass
-- Never comment out code that "doesn't work yet"
-- If something is broken, fix it or mark the entire feature as not ready
-
-### 6. Training Scope (Current)
-| Method | Status | Notes |
-|--------|--------|-------|
-| LoRA | **Supported** | Primary training method via AI-Toolkit |
-| DoRA | Not Supported | May be added in future |
-| Full Fine-Tune | Not Supported | Out of scope |
-
-### 7. Video is Scaffold-Only
-- Video pipeline interface exists for future implementation
-- UI shows "In Development" banner
-- No video generation code should be executed
-- This is clearly communicated to users
-
-### 8. No Fragile Version Assumptions
-- ComfyUI workflows should use stable node names, not version-specific hacks
-- Pin critical dependencies in requirements.txt / package.json
-- Design for safe upgrades: isolate version-specific code in adapters
-
-### 9. Double-Apply Doctrine (Remote + Local Sync) - CRITICAL
-
-> **Every modification made on a remote RunPod instance MUST also be applied to the local repository.**
-
-When debugging or fixing issues on a live RunPod deployment, code changes are often made directly on the pod to quickly resolve problems. However, these changes are **ephemeral** - they will be lost when:
-- The pod is restarted or terminated
-- A new Docker image is deployed
-- The pod is recreated from template
-
-#### Mandatory Workflow
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  1. Connect to RunPod                                           │
-│     ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519               │
-├─────────────────────────────────────────────────────────────────┤
-│  2. Make fix on remote pod                                      │
-│     (edit files in /app or /runpod-volume/isengard)            │
-├─────────────────────────────────────────────────────────────────┤
-│  3. IMMEDIATELY apply same fix to local repo                    │
-│     (edit corresponding files in ~/OF/Isengard)                │
-├─────────────────────────────────────────────────────────────────┤
-│  4. Commit to git with descriptive message                      │
-│     git add . && git commit -m "fix: <description>"            │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-#### Claude Code Responsibilities
-
-When working with remote pods, Claude Code MUST:
-
-1. **Track all remote edits** - Keep a mental list of every file modified on the pod
-2. **Mirror changes immediately** - After each remote fix, apply to local repo before moving on
-3. **Verify parity** - Compare remote files with local to ensure sync:
-   ```bash
-   # Compare remote and local file
-   ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "cat /app/path/to/file.py" > /tmp/remote.py
-   diff /tmp/remote.py ~/OF/Isengard/path/to/file.py
-   ```
-4. **Never leave session without syncing** - At end of any remote session, confirm all changes are in local repo
-
-#### Common Remote Locations → Local Equivalents
-
-| Remote Path | Local Path |
-|-------------|------------|
-| `/app/apps/api/src/` | `apps/api/src/` |
-| `/app/apps/web/src/` | `apps/web/src/` |
-| `/app/packages/plugins/` | `packages/plugins/` |
-| `/app/packages/shared/` | `packages/shared/` |
-| `/runpod-volume/isengard/` | `data/` (for artifacts) |
-
-#### SSH Connection Template
-
-```bash
-# Standard connection
-ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519
-
-# Quick file comparison
-ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "cat /app/<file>" | diff - ~/OF/Isengard/<file>
-
-# Bulk file list for comparison
-ssh root@<IP> -p <PORT> -i ~/.ssh/id_ed25519 "find /app -name '*.py' -type f" | sort
-```
-
-#### Red Flags (Never Do These)
-
-- ❌ Fix a bug on the pod and forget to apply locally
-- ❌ Make "temporary" fixes that never get committed
-- ❌ End a session with unsynced changes
-- ❌ Push a new Docker image without including all pod fixes
-
-### 10. Auto-Commit All Changes (Docker Image Sync) - CRITICAL
-
-> **Claude Code MUST commit all changes before the user deploys a new Docker image.**
-
-Docker images are built from the git repository. Any uncommitted changes will NOT be included in the image. This has caused deployment issues where the user sees "old" behavior because the fixes were never committed.
-
-#### Mandatory Behavior
-
-1. **Before ending any session** - Check `git status` for uncommitted changes
-2. **If changes exist** - Commit them with a descriptive message
-3. **Proactive commits** - Don't wait for user to ask; commit after completing work
-4. **Atomic commits** - Group related changes; separate unrelated work
-
-#### Commit Triggers
-
-Claude Code MUST commit when ANY of these occur:
-
-- ✅ Finishing a bug fix or feature
-- ✅ Modifying `start.sh`, `Dockerfile`, or deployment scripts
-- ✅ User mentions deploying, rebuilding, or pushing an image
-- ✅ User says they're "done for now" or ending the session
-- ✅ Switching to work on an unrelated task
-
-#### Commit Message Format
-
-```bash
-git add -A && git commit -m "$(cat <<'EOF'
-<type>: <short description>
-
-<optional body with details>
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
-EOF
-)"
-```
-
-Types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `style`
-
-#### Red Flags (Never Do These)
-
-- ❌ Leave uncommitted changes when user mentions Docker/deployment
-- ❌ Assume user will commit later
-- ❌ Let a session end with `git status` showing modified files
-- ❌ Wait for user to explicitly ask for a commit
-
-### 11. No Legacy in Build (Zero-Tolerance) - CRITICAL
-
-> **When implementing, refactoring, or replacing a feature, the new version MUST be the only one visible to runtime, Docker build context, and execution paths.**
-
-Legacy, superseded, or obsolete files left in active directories cause deployment failures, confusion, and bugs. This rule enforces aggressive cleanup.
-
-#### Legacy Handling Policy (Non-Optional)
-
-When you create a new script/module/config that replaces an existing one:
-
-1. **You MUST NOT leave the legacy file in-place**
-2. **You MUST take action** — either:
-   - **DELETE** it entirely (preferred), OR
-   - **MOVE** it to the legacy dump directory
-
-**Silence or ambiguity is not acceptable — action is mandatory.**
-
-#### Legacy Dump Directory
-
-| Attribute | Value |
-|-----------|-------|
-| **Path** | `/_legacy_dump/` (repo root) |
-| **Purpose** | Archival ONLY — never imported, executed, or referenced |
-| **Excluded from** | `.gitignore`, `.dockerignore` |
-
-Files in `/_legacy_dump/`:
-- ❌ May NOT be imported by any module
-- ❌ May NOT be referenced in configs
-- ❌ May NOT be mounted into containers
-- ❌ May NOT be copied during Docker build
-- ✅ Exist purely for historical reference if needed
-
-#### Build & Runtime Safety
-
-Docker images built from this repo MUST only include active implementations:
-
-```
-✓ Active code:     apps/, packages/, scripts/, start.sh
-✗ Legacy code:     /_legacy_dump/* (excluded by .dockerignore)
-```
-
-#### Change Discipline
-
-Whenever you modify functionality:
-
-1. **Identify** — Explicitly list which files are now obsolete
-2. **Act** — Delete or relocate them in the **same commit**
-3. **Verify** — Confirm no duplicates, shadows, or "just in case" files remain
-
-#### Enforcement Checklist (Claude MUST Self-Verify)
-
-Before concluding ANY task involving file creation or modification:
-
-```
-□ No obsolete files remain outside /_legacy_dump/
-□ No duplicate implementations exist in active paths
-□ Docker build context contains only current code
-□ All imports and references point to the new version
-□ Old file paths are not hardcoded anywhere
-```
-
-#### Zero-Tolerance Rule
-
-| Violation | Status |
-|-----------|--------|
-| Leaving deprecated files in active directories | **FAILURE** |
-| Creating new file without removing old version | **FAILURE** |
-| "Keeping it just in case" in active paths | **FAILURE** |
-| Forgetting to check for shadows/duplicates | **FAILURE** |
-
-#### Example Scenarios
-
-**Scenario 1: Replacing a startup script**
-```bash
-# OLD: deploy/runpod/start.sh (200 lines, outdated)
-# NEW: start.sh (500 lines, current)
-
-# CORRECT ACTION:
-rm deploy/runpod/start.sh  # DELETE - it's superseded
-# OR
-mv deploy/runpod/start.sh _legacy_dump/deploy-runpod-start-v1.sh
-```
-
-**Scenario 2: Refactoring a module**
-```bash
-# OLD: packages/shared/src/old_logging.py
-# NEW: packages/shared/src/logging.py
-
-# CORRECT ACTION:
-rm packages/shared/src/old_logging.py
-git grep -l "old_logging" | xargs sed -i 's/old_logging/logging/g'
-```
-
-**Scenario 3: Moving functionality**
-```bash
-# OLD: apps/api/src/utils/helpers.py (has generate_id())
-# NEW: packages/shared/src/utils.py (now has generate_id())
-
-# CORRECT ACTION:
-# 1. Update all imports to use new location
-# 2. Delete the old file OR remove the moved function from it
-# 3. Verify: git grep "from.*helpers import"
-```
-
-#### Red Flags (Immediate Action Required)
-
-- ❌ Two files with similar names doing similar things
-- ❌ Files with `_old`, `_backup`, `_v1`, `_deprecated` suffixes in active dirs
-- ❌ `deploy/runpod/start.sh` AND `start.sh` both existing
-- ❌ Comments like "# OLD VERSION - DO NOT USE" in active code
-- ❌ Imports pointing to files that have "replacement" versions
-
-### 12. Startup Logs – RunPod / Container Best Practices (Mandatory)
-
-> **Startup logs must be clean, readable, and feel live without producing hundreds of duplicated lines.**
-
-Logs are viewed ONLY via RunPod pod logs (container stdout/stderr). No GUI, no browser rendering.
-
-#### Why In-Place Updates Matter
-
-Container log viewers (RunPod, Docker, Kubernetes) capture every line written to stdout. Traditional progress bars that print new lines create:
-- Hundreds of duplicate "progress" entries
-- Unreadable log history
-- Bloated log storage
-- Impossible debugging
-
-**Solution:** Use ANSI escape sequences for single-line updates that overwrite in place.
-
-#### Two Types of Startup Output
-
-| Type | Behavior | Example |
-|------|----------|---------|
-| **Immutable Logs** | Permanent, append-only | `[12:34:56] INFO: Starting Redis...` |
-| **Live Status** | Single line, overwritten | `Downloading: flux1-dev.safetensors [=====>    ] 45% 12.3MB/s` |
-
-**Rule:** Live status lines MUST be overwritten. Immutable logs MUST NOT be overwritten.
-
-#### Safe ANSI Escape Sequences
-
-Only these escapes are safe in container environments:
-
-| Escape | Code | Purpose |
-|--------|------|---------|
-| Carriage Return | `\r` | Return cursor to line start |
-| Clear Line | `\x1b[2K` | Erase entire current line |
-| Colors | `\x1b[32m` etc. | Green, yellow, red, cyan |
-| Reset | `\x1b[0m` | Reset all formatting |
-
-**Forbidden:** Cursor movement (`\x1b[A`, `\x1b[B`), screen clear (`\x1b[2J`), save/restore cursor.
-
-#### TTY Detection and Graceful Degradation
-
-```bash
-# Detect if stdout is a TTY
-if [ -t 1 ]; then
-    IS_TTY=1
-else
-    IS_TTY=0
-fi
-```
-
-| Context | `IS_TTY` | Behavior |
-|---------|----------|----------|
-| Interactive terminal | 1 | Use `\r` for in-place updates |
-| CI/CD, log capture | 0 | Print periodic summary lines only |
-| RunPod logs | Usually 0 | Summary mode (safe) |
-
-#### Color Conventions
-
-| Level | Color | Code | Usage |
-|-------|-------|------|-------|
-| INFO | Green | `\x1b[32m` | Normal operations |
-| WARN | Yellow | `\x1b[33m` | Non-fatal issues |
-| ERROR | Red | `\x1b[31m` | Failures |
-| PHASE | Cyan | `\x1b[36m` | Section headers |
-| BOLD | Bold | `\x1b[1m` | Emphasis |
-
-#### Official Isengard Startup Logging Pattern
-
-Every startup phase follows this exact pattern:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ PHASE START (immutable)                                      │
-│   [HH:MM:SS] ▶ Starting phase: Model Download               │
-├─────────────────────────────────────────────────────────────┤
-│ LIVE STATUS (overwritten in-place, or periodic in non-TTY)  │
-│   Downloading flux1-dev.safetensors... 2.3GB/23GB (10%)     │
-│   Downloading flux1-dev.safetensors... 5.1GB/23GB (22%)     │  ← Same line
-│   Downloading flux1-dev.safetensors... 23GB/23GB (100%)     │  ← Same line
-├─────────────────────────────────────────────────────────────┤
-│ PHASE END (immutable)                                        │
-│   [HH:MM:SS] ✓ Model Download complete (45s)                │
-│   OR                                                        │
-│   [HH:MM:SS] ✗ Model Download failed: connection timeout    │
-└─────────────────────────────────────────────────────────────┘
-```
-
-#### Mandatory Logging Helpers
-
-The startup script MUST define and use these helpers:
-
-```bash
-# TTY detection
-IS_TTY=0; [ -t 1 ] && IS_TTY=1
-
-# Immutable log functions (always print newline)
-log_info()  { echo -e "\x1b[32m[$(date +'%H:%M:%S')]\x1b[0m $1"; }
-log_warn()  { echo -e "\x1b[33m[$(date +'%H:%M:%S')] WARN:\x1b[0m $1"; }
-log_error() { echo -e "\x1b[31m[$(date +'%H:%M:%S')] ERROR:\x1b[0m $1"; }
-log_phase() { echo -e "\n\x1b[36m[$(date +'%H:%M:%S')] ▶ $1\x1b[0m"; }
-
-# Live status (overwrites current line)
-log_status() {
-    if [ "$IS_TTY" = "1" ]; then
-        echo -ne "\x1b[2K\r  $1"
-    fi
-    # Non-TTY: silent (use log_progress for periodic updates)
-}
-
-# Finalize live status line (print newline to preserve final state)
-log_status_done() {
-    if [ "$IS_TTY" = "1" ]; then
-        echo ""  # Newline to preserve the final status
-    fi
-}
-
-# Periodic progress for non-TTY (prints every N seconds)
-log_progress() {
-    local msg="$1"
-    local interval="${2:-10}"  # Default 10 seconds
-    local now=$(date +%s)
-    local last_var="LAST_PROGRESS_${3:-DEFAULT}"
-    local last=${!last_var:-0}
-
-    if [ $((now - last)) -ge $interval ]; then
-        echo -e "  \x1b[90m$msg\x1b[0m"
-        eval "$last_var=$now"
-    fi
-}
-```
-
-#### External Tool Progress Handling
-
-For tools like `rclone`, `aria2c`, `wget` that produce their own progress:
-
-| Tool | Non-TTY Flags | Effect |
-|------|---------------|--------|
-| rclone | `--stats-one-line --stats 10s --quiet` | One summary line every 10s |
-| aria2c | `--summary-interval=10 --console-log-level=warn` | Summary every 10s |
-| wget | `--progress=dot:giga` | One dot per GB |
-| curl | `-s` or `--no-progress-meter` | Silent |
-
-**Pattern for external tools:**
-```bash
-if [ "$IS_TTY" = "1" ]; then
-    # Interactive: show progress
-    rclone copy ... --progress
-else
-    # Non-TTY: minimal output
-    rclone copy ... --stats-one-line --stats 10s -q
-fi
-```
-
-#### Forbidden Patterns
-
-| Pattern | Why It's Wrong |
-|---------|---------------|
-| `echo "Progress: $i%"` in a loop | Creates hundreds of lines |
-| `--progress` without TTY check | Spams logs in containers |
-| `while true; do echo status; done` | Infinite log spam |
-| Spinners without `\r` | Each frame is a new line |
-
-#### Error Handling in Phases
-
-On error, immediately:
-1. Stop any live status updates
-2. Finalize the status line with newline
-3. Print clear ERROR block
-4. Exit with non-zero code
-
-```bash
-phase_failed() {
-    local phase="$1"
-    local reason="$2"
-    log_status_done  # Finalize any live status
-    log_error "Phase '$phase' failed: $reason"
-    exit 1
-}
-```
-
----
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Frontend (React)                         │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────────┐│
-│  │Characters│ │ Training │ │ Image Gen│ │ Video (In Dev)       ││
-│  └──────────┘ └──────────┘ └──────────┘ └──────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-                              │ HTTP/SSE
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Backend API (FastAPI)                       │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────────┐│
-│  │  Routes  │ │ Services │ │  Queue   │ │   Shared Logging     ││
-│  └──────────┘ └──────────┘ └──────────┘ └──────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-                              │ Redis Queue
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Worker (Background Jobs)                    │
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │                    Plugin Executor                           ││
-│  └──────────────────────────────────────────────────────────────┘│
-│       │                    │                    │                │
-│       ▼                    ▼                    ▼                │
-│  ┌─────────┐         ┌──────────┐         ┌─────────┐           │
-│  │Training │         │  Image   │         │  Video  │           │
-│  │ Plugin  │         │  Plugin  │         │ Plugin  │           │
-│  │(AI-Tklt)│         │(ComfyUI) │         │(Scaffold│           │
-│  └─────────┘         └──────────┘         └─────────┘           │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Shared Libraries                            │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────────┐│
-│  │  Types   │ │  Config  │ │ Logging  │ │   Utilities          ││
-│  └──────────┘ └──────────┘ └──────────┘ └──────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-```
+- Plugins loaded by Worker, never imported by API
 
 ### Directory Structure
 
 ```
 isengard/
 ├── apps/
-│   ├── api/                 # FastAPI backend
-│   │   ├── src/
-│   │   │   ├── routes/      # HTTP endpoints
-│   │   │   ├── services/    # Business logic
-│   │   │   └── models/      # Pydantic models
-│   │   ├── requirements.txt
-│   │   └── Dockerfile
-│   ├── worker/              # Background job processor
-│   │   ├── src/
-│   │   ├── requirements.txt
-│   │   └── Dockerfile
-│   └── web/                 # React frontend
-│       ├── src/
-│       │   ├── components/  # Reusable UI components
-│       │   ├── pages/       # Route-based pages
-│       │   ├── hooks/       # Custom React hooks
-│       │   └── lib/         # Utilities
-│       ├── package.json
-│       └── Dockerfile
+│   ├── api/              # FastAPI backend
+│   ├── worker/           # Background job processor
+│   └── web/              # React frontend
 ├── packages/
-│   ├── shared/              # Shared Python utilities
-│   │   └── src/
-│   │       ├── logging.py   # Structured logging
-│   │       ├── config.py    # Environment config
-│   │       └── types.py     # Shared type definitions
+│   ├── shared/           # Shared Python utilities (logging, config, types)
 │   └── plugins/
-│       ├── training/        # Training backend plugins
-│       │   ├── src/
-│       │   │   ├── interface.py    # Abstract base class
-│       │   │   └── ai_toolkit.py   # AI-Toolkit adapter
-│       │   └── __init__.py
-│       ├── image/           # Image generation plugins
-│       │   ├── src/
-│       │   │   ├── interface.py    # Abstract base class
-│       │   │   └── comfyui.py      # ComfyUI adapter
-│       │   └── __init__.py
-│       └── video/           # Video generation (scaffold)
-│           ├── src/
-│           │   └── interface.py    # Abstract base class only
-│           └── __init__.py
-├── infra/
-│   └── docker/              # Docker configurations
-├── scripts/                 # Development helper scripts
-├── reports/                 # Generated reports
-├── data/                    # Local dev artifacts (gitignored)
-├── logs/                    # Observability logs
-└── tmp/                     # Ephemeral scratch space
+│       ├── training/     # AI-Toolkit adapter
+│       ├── image/        # ComfyUI adapter
+│       └── video/        # Scaffold only
+├── start.sh              # Container entrypoint
+└── Dockerfile
 ```
+
+### Storage
+
+| Environment | Location | Purpose |
+|-------------|----------|---------|
+| RunPod | `/runpod-volume/isengard/` | ALL persistent data |
+| Local Dev | `./data/` | Uploads, models, outputs |
+| Container | Filesystem | Ephemeral only |
+
+Path resolution via `packages/shared/src/config.py`, never hardcoded.
 
 ---
 
-## Fast-Test vs Production Modes
+## Modes
 
-### Fast-Test Mode
-**Purpose:** Validate wiring, endpoints, and UI flow without GPU or large models.
-
-| Aspect | Configuration |
-|--------|---------------|
-| Training | Mock trainer that creates placeholder `.safetensors` file |
-| Image Gen | Returns pre-cached sample images or solid color placeholders |
-| Models | No model downloads; use stubs |
-| Hardware | CPU-only, minimal RAM |
-| Use Case | CI/CD, local development, UI testing |
-
-**Activation:** `ISENGARD_MODE=fast-test`
-
-### Production Mode
-**Purpose:** Full-quality training and generation with SOTA models.
-
-| Aspect | Configuration |
-|--------|---------------|
-| Training | AI-Toolkit with FLUX.1-dev LoRA (or best pinned version) |
-| Image Gen | ComfyUI with FLUX/SDXL workflows |
-| Models | Full model downloads to persistent volume |
-| Hardware | GPU required (minimum: RTX 3090/A5000) |
-| Use Case | Actual user-facing deployments |
-
-**Activation:** `ISENGARD_MODE=production`
+| Mode | Activation | Use Case |
+|------|------------|----------|
+| `fast-test` | `ISENGARD_MODE=fast-test` | CI/UI testing, mock plugins, no GPU |
+| `production` | `ISENGARD_MODE=production` | Real AI-Toolkit + ComfyUI |
 
 ---
 
-## Observability Standard
+## Non-Negotiables
 
-### Structured Logging Requirements
+### 1. Plugin Architecture
+- Training/Image/Video backends are swappable modules in `packages/plugins/*/`
+- Each implements interface defined in `interface.py`
+- Core code NEVER imports plugin internals
 
-All services MUST emit JSON-formatted logs with these fields:
+### 2. Observability First
+- Structured JSON logging mandatory
+- Every request has correlation ID propagated through stack
+- Logs are primary source of truth for debugging
 
-```json
-{
-  "timestamp": "2024-01-15T10:30:00.000Z",
-  "level": "INFO",
-  "service": "api",
-  "correlation_id": "req-abc123",
-  "message": "Training job started",
-  "context": {
-    "character_id": "char-xyz",
-    "job_id": "job-456"
-  }
-}
-```
+### 3. No Give Up Fixes
+- Fix root causes, not symptoms
+- Never disable features to make tests pass
+- If broken, mark feature as not-ready
 
-### Correlation ID Propagation
+### 4. Double-Apply Doctrine (Remote + Local Sync)
+When fixing on RunPod pod:
+1. Make fix on remote pod
+2. IMMEDIATELY apply same fix to local repo
+3. Commit with descriptive message
 
-```
-Frontend                  Backend API              Worker
-   │                          │                       │
-   │ X-Correlation-ID: abc123 │                       │
-   ├─────────────────────────►│                       │
-   │                          │ correlation_id: abc123│
-   │                          ├──────────────────────►│
-   │                          │                       │
-   │   SSE: job progress      │                       │
-   │◄─────────────────────────┤◄──────────────────────┤
-```
+Remote → Local path mapping:
+- `/app/apps/` → `apps/`
+- `/app/packages/` → `packages/`
 
-- Frontend generates `X-Correlation-ID` header for each user action
-- Backend extracts and propagates to all downstream calls
-- Worker includes in all job-related log messages
-- SSE events include correlation ID for client-side matching
+### 5. Auto-Commit Before Deploy
+Claude Code MUST commit all changes before user deploys Docker image.
+- Check `git status` before ending session
+- Commit after completing any work
+- Never leave uncommitted changes
 
-### Log File Layout
+### 6. No Legacy in Build
+When replacing a file:
+1. DELETE the old file (preferred), or
+2. Move to `/_legacy_dump/` (archival only)
 
-```
-logs/
-├── api/
-│   ├── 2024-01-15.log
-│   └── 2024-01-16.log
-├── worker/
-│   ├── 2024-01-15.log
-│   └── 2024-01-16.log
-└── frontend/
-    └── 2024-01-15.log
-```
-
-### Retention Policy
-- Keep 30 days of logs locally
-- Rotate daily, compress after 7 days
-- In production, ship to external log aggregator (phase 2)
-
-### Redaction Rules
-
-The logging module MUST redact these patterns before writing:
-
-| Pattern | Replacement | Example |
-|---------|-------------|---------|
-| `hf_[A-Za-z0-9]+` | `hf_***REDACTED***` | HuggingFace tokens |
-| `sk-[A-Za-z0-9]+` | `sk-***REDACTED***` | API keys |
-| `/Users/*/` | `/[HOME]/` | Local user paths |
-| `token=[^&\s]+` | `token=***` | URL tokens |
-| `password=.*` | `password=***` | Passwords |
-
-### 🔒 Logging-First Troubleshooting Doctrine (Non-Negotiable)
-
-This doctrine is **MANDATORY** for all development and debugging activities in Isengard.
-
-#### Core Principles
-
-1. **All services MUST emit structured JSON logs for every action**
-   - Not just errors — INFO-level and above for every meaningful operation
-   - Every request, job start/stop, state transition, and external call must be logged
-   - Silence is failure; if something happens and there's no log, the code is incomplete
-
-2. **Logs are the PRIMARY source of truth for system behavior**
-   - The question "what happened?" is answered by logs, not by reading code
-   - If logs contradict code, investigate the discrepancy — don't assume code is correct
-   - Debug sessions start with logs, not breakpoints
-
-3. **Claude Code MUST inspect, organize, and summarize logs BEFORE reasoning about any bug**
-   - Step 1: Locate the relevant log files
-   - Step 2: Organize by correlation ID and timestamp
-   - Step 3: Read end-to-end, noting anomalies
-   - Step 4: Summarize findings in writing
-   - Step 5: ONLY THEN propose hypotheses
-
-4. **Claude Code MUST automatically rotate logs per service per day and archive previous runs**
-   - Log directory structure: `logs/{service}/latest/` and `logs/{service}/archive/YYYYMMDD_HHMMSS/`
-   - On each run, move `latest/` to `archive/{timestamp}/` before writing new logs
-   - Each session boundary is clearly marked
-
-5. **Claude Code is NOT allowed to propose solutions without citing evidence from logs**
-   - Every bug fix proposal must reference specific log entries
-   - "I suspect X" without log evidence is not acceptable
-   - If logs don't show the problem, add logging first
-
-6. **If logs are insufficient, improving logging is the first fix**
-   - Missing logs > Missing features in priority
-   - A feature without observability is not complete
-   - "Add logging" is never tech debt — it's the primary deliverable
-
-#### Log Directory Structure (Target State)
-
-```
-logs/
-├── api/
-│   ├── latest/
-│   │   └── api.log
-│   └── archive/
-│       ├── 20250125_143022/
-│       │   └── api.log
-│       └── 20250125_102015/
-│           └── api.log
-├── worker/
-│   ├── latest/
-│   │   ├── worker.log
-│   │   └── subprocess/
-│   │       ├── train-abc123.stdout.log
-│   │       └── train-abc123.stderr.log
-│   └── archive/
-│       └── .../
-└── web/
-    ├── latest/
-    │   └── client.log
-    └── archive/
-        └── .../
-```
-
-#### Required Log Schema
-
-Every log entry MUST contain:
-
-```json
-{
-  "timestamp": "2025-01-25T14:30:00.000Z",
-  "level": "INFO|WARN|ERROR|DEBUG",
-  "service": "api|worker|web",
-  "correlation_id": "req-abc123",
-  "message": "Human-readable description",
-  "event": "request.start|job.progress|error.unhandled",
-  "context": { }
-}
-```
-
-#### Verification Commands
-
-```bash
-# Check log structure
-scripts/validate_logs.py
-
-# Run observability smoke test
-scripts/obs_smoke_test.py
-
-# Tail structured logs with formatting
-tail -f logs/api/latest/api.log | jq .
-```
+Never leave deprecated files in active directories.
 
 ---
 
-## Training Debugging Workflow
+## Current Features
 
-> **When a training bug occurs, Claude Code MUST follow this exact workflow.**
+### Training
+- [x] LoRA training via AI-Toolkit (FLUX.1-dev)
+- [x] Training presets (Quick/Balanced/High Quality)
+- [x] SSE live progress streaming
+- [x] Loss chart with real-time updates
+- [x] Sample image generation during training
+- [x] GPU stats monitoring
 
-### 5-Step Debug Protocol (Mandatory)
+### Image Generation
+- [x] ComfyUI with FLUX workflows
+- [x] 7 aspect ratio presets
+- [x] LoRA selection from trained characters
+- [x] Advanced toggles (ControlNet, IP-Adapter, FaceDetailer, Upscale)
 
-When investigating any training failure:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  STEP 1: Identify job_id + correlation_id                               │
-│  ────────────────────────────────────────────────────────────────────── │
-│  • Check UI error message for job_id (e.g., "train-abc123")            │
-│  • Check API response headers for X-Correlation-ID                      │
-│  • If missing, search logs: grep "job_id" logs/api/latest/api.log      │
-├─────────────────────────────────────────────────────────────────────────┤
-│  STEP 2: Pull events.jsonl + service logs                               │
-│  ────────────────────────────────────────────────────────────────────── │
-│  • Per-job log: logs/jobs/{job_id}/events.jsonl                        │
-│  • API logs: logs/api/latest/api.log                                   │
-│  • Worker logs: logs/worker/latest/worker.log                          │
-│  • Or use API: GET /api/jobs/{job_id}/logs                             │
-├─────────────────────────────────────────────────────────────────────────┤
-│  STEP 3: Find first error event                                         │
-│  ────────────────────────────────────────────────────────────────────── │
-│  • In events.jsonl: grep -n '"level":"ERROR"' events.jsonl | head -1   │
-│  • Note timestamp, event type, error message, stack trace              │
-│  • Or use API: GET /api/jobs/{job_id}/logs/view?level=ERROR            │
-├─────────────────────────────────────────────────────────────────────────┤
-│  STEP 4: Provide root cause + minimal fix                               │
-│  ────────────────────────────────────────────────────────────────────── │
-│  • Cite specific log entries as evidence                               │
-│  • Trace error back through correlation_id                             │
-│  • Identify which component failed (API/Worker/Plugin)                 │
-│  • Propose targeted fix (not shotgun debugging)                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│  STEP 5: Add regression test or Fast-Test reproduction                  │
-│  ────────────────────────────────────────────────────────────────────── │
-│  • Add test to tests/test_training_observability.py                    │
-│  • Or create minimal Fast-Test reproduction script                     │
-│  • Verify fix with: ISENGARD_MODE=fast-test pytest -v                  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### Per-Job Log Structure
-
-Every training job creates its own log directory:
-
-```
-logs/
-├── jobs/
-│   └── {job_id}/
-│       ├── events.jsonl          # Main structured event log
-│       └── samples/              # Sample images generated during training
-│           ├── step_100.png
-│           ├── step_200.png
-│           └── ...
-└── bundles/
-    └── {job_id}_debug.zip        # Debug bundle (on-demand)
-```
-
-### events.jsonl Schema
-
-Each line in events.jsonl is a JSON object:
-
-```json
-{
-  "ts": "2025-01-28T10:30:00.000Z",
-  "level": "INFO",
-  "service": "api",
-  "job_id": "train-abc123",
-  "correlation_id": "req-xyz789",
-  "event": "training.step",
-  "msg": "Training step 100/1000",
-  "fields": {
-    "step": 100,
-    "loss": 0.0523,
-    "lr": 0.0001,
-    "eta_seconds": 3600
-  }
-}
-```
-
-**Key Event Types:**
-
-| Event | Description |
-|-------|-------------|
-| `training.start` | Job began, includes config summary |
-| `training.step` | Progress update with loss/lr/step |
-| `training.sample` | Sample image generated |
-| `training.complete` | Job finished successfully |
-| `training.failed` | Job failed with error details |
-| `subprocess.stdout` | Raw trainer subprocess output |
-| `subprocess.stderr` | Raw trainer subprocess errors |
-
-### Debug Bundle Generation
-
-Create a comprehensive debug package for any job:
-
-```bash
-# Via CLI
-python scripts/debug_bundle.py train-abc123
-
-# Via CLI with custom output path
-python scripts/debug_bundle.py train-abc123 --output /tmp/debug.zip
-
-# Via CLI showing first error
-python scripts/debug_bundle.py train-abc123 --show-error
-
-# Via API (download ZIP)
-curl -O http://localhost:8000/api/jobs/train-abc123/debug-bundle
-```
-
-**Bundle Contents:**
-
-```
-train-abc123_debug.zip
-└── train-abc123/
-    ├── README.txt           # Quick reference guide
-    ├── metadata.json        # Job configuration (secrets redacted)
-    ├── events.jsonl         # Full event log (secrets redacted)
-    ├── environment.json     # Runtime environment snapshot
-    ├── service_logs/
-    │   ├── api.log          # Last 1000 lines from API
-    │   └── worker.log       # Last 1000 lines from Worker
-    └── samples/
-        ├── step_100.png     # Sample images
-        └── step_200.png
-```
-
-### API Endpoints for Debugging
-
-| Endpoint | Purpose | Example |
-|----------|---------|---------|
-| `GET /api/jobs/{id}/logs` | Download full events.jsonl | `curl -O .../logs` |
-| `GET /api/jobs/{id}/logs/view` | View logs with filtering | `?level=ERROR&limit=50` |
-| `GET /api/jobs/{id}/stream` | SSE live progress stream | EventSource in browser |
-| `GET /api/jobs/{id}/artifacts` | List all job artifacts | Returns JSON array |
-| `GET /api/jobs/{id}/artifacts/samples/{file}` | Download sample image | `step_100.png` |
-| `GET /api/jobs/{id}/debug-bundle` | Download ZIP bundle | For offline analysis |
-| `GET /api/jobs/{id}/summary` | Quick status check | progress, status, last error |
-
-### Fast-Test Mode Validation
-
-Before deploying fixes, validate in Fast-Test mode:
-
-```bash
-# Run full observability test suite
-ISENGARD_MODE=fast-test pytest tests/test_training_observability.py -v
-
-# Test specific scenarios
-pytest tests/test_training_observability.py::TestLogRedaction -v
-pytest tests/test_training_observability.py::TestTrainingProgressEvent -v
-pytest tests/test_training_observability.py::TestEventBus -v
-pytest tests/test_training_observability.py::TestTrainingJobLogger -v
-pytest tests/test_training_observability.py::TestMockPluginSampleGeneration -v
-```
-
-### Common Debugging Scenarios
-
-#### Scenario: Training never starts
-
-```bash
-# 1. Check if job was created
-curl http://localhost:8000/api/jobs/train-xxx/summary
-
-# 2. Check API logs for queue errors
-grep "train-xxx" logs/api/latest/api.log | jq .
-
-# 3. Check worker is running and consuming
-grep "job.start" logs/worker/latest/worker.log | tail -10
-```
-
-#### Scenario: Training fails mid-run
-
-```bash
-# 1. Get events around failure
-curl "http://localhost:8000/api/jobs/train-xxx/logs/view?level=ERROR"
-
-# 2. Check for subprocess errors
-grep "subprocess" logs/jobs/train-xxx/events.jsonl | jq .
-
-# 3. Generate debug bundle for full context
-python scripts/debug_bundle.py train-xxx --show-error
-```
-
-#### Scenario: Samples not appearing in UI
-
-```bash
-# 1. Check if samples were generated
-ls logs/jobs/train-xxx/samples/
-
-# 2. Check sample events in log
-grep "training.sample" logs/jobs/train-xxx/events.jsonl | jq .
-
-# 3. Verify artifact endpoint
-curl http://localhost:8000/api/jobs/train-xxx/artifacts
-```
-
-#### Scenario: SSE stream not updating
-
-```bash
-# 1. Check EventBus is publishing
-grep "event_bus.publish" logs/api/latest/api.log | tail -20
-
-# 2. Verify SSE endpoint responds
-curl -N http://localhost:8000/api/jobs/train-xxx/stream
-
-# 3. Check for subscription errors
-grep "subscribe" logs/api/latest/api.log | jq .
-```
-
-### Debugging Checklist for Claude Code
-
-When debugging any training issue, verify:
-
-- [ ] `job_id` identified from error message or logs
-- [ ] `correlation_id` traced through all services
-- [ ] Per-job `events.jsonl` located and examined
-- [ ] First ERROR event timestamp noted
-- [ ] Root cause identified with log evidence
-- [ ] Fix proposed and tested in Fast-Test mode
-- [ ] Regression test added or reproduction documented
+### UI
+- [x] Characters: CRUD, image upload, trigger word
+- [x] Dataset Manager: global image grid, filters, bulk delete
+- [x] Training: job monitoring with metrics
+- [x] Generate: prompt-based with presets
 
 ---
 
-## Development Workflow
+## API Endpoints
 
-### Local Run (One Command)
-
-```bash
-# Start all services
-docker-compose up
-
-# Or with build
-docker-compose up --build
+### Characters
+```
+GET/POST /api/characters
+GET/PATCH/DELETE /api/characters/{id}
+POST /api/characters/{id}/images
+GET/DELETE /api/characters/{id}/images/{file}
 ```
 
-### Individual Services (Development)
-
-```bash
-# Backend API
-cd apps/api && pip install -r requirements.txt && uvicorn src.main:app --reload
-
-# Worker
-cd apps/worker && pip install -r requirements.txt && python -m src.main
-
-# Frontend
-cd apps/web && npm install && npm run dev
+### Training
+```
+POST /api/training              # Start job
+GET /api/training/{id}          # Get status
+GET /api/training/{id}/stream   # SSE progress
+POST /api/training/{id}/cancel
 ```
 
-### Lint, Format, Test
-
-```bash
-# Python (backend + worker)
-ruff check .
-ruff format .
-pytest
-
-# TypeScript (frontend)
-npm run lint
-npm run format
-npm test
+### Jobs (debugging)
 ```
-
-### Definition of Done (PR/Commit Checklist)
-
-Before any PR is merged:
-
-- [ ] All tests pass (`pytest` / `npm test`)
-- [ ] Linting passes (`ruff check` / `npm run lint`)
-- [ ] No new warnings introduced
-- [ ] Structured logging added for new code paths
-- [ ] Correlation IDs propagated correctly
-- [ ] Documentation updated if behavior changed
-- [ ] No secrets or local paths in code
-- [ ] Tested in both fast-test and production modes (if applicable)
-
----
-
-## Training Backend Protection Rule
-
-> **Core training logic must be treated as stable infrastructure.**
-
-Once a training backend plugin (e.g., AI-Toolkit adapter) is integrated and working:
-
-1. **Changes to training internals require:**
-   - Explicit design note in PR description
-   - Version bump in plugin metadata
-   - Before/after comparison of training results
-
-2. **Typical fixes should be in:**
-   - Configuration handling
-   - I/O and file management
-   - Logging and error reporting
-   - Interface compliance
-
-3. **Never modify directly without justification:**
-   - Optimizer settings
-   - Learning rate schedules
-   - Loss calculations
-   - Data augmentation pipelines
-
----
-
-## Capability Matrix
-
-This matrix is authoritative for what features are supported:
-
-```python
-# packages/shared/src/capabilities.py
-
-CAPABILITIES = {
-    "training": {
-        "lora": {
-            "supported": True,
-            "backend": "ai-toolkit",
-            "status": "production"
-        },
-        "dora": {
-            "supported": False,
-            "status": "not_implemented",
-            "notes": "May be added in future versions"
-        },
-        "full_finetune": {
-            "supported": False,
-            "status": "out_of_scope",
-            "notes": "Not planned for this project"
-        }
-    },
-    "image_generation": {
-        "comfyui": {
-            "supported": True,
-            "status": "production"
-        }
-    },
-    "video_generation": {
-        "any": {
-            "supported": False,
-            "status": "scaffold_only",
-            "notes": "Interface defined, no implementation"
-        }
-    }
-}
+GET /api/jobs/{id}/logs/view    # View logs with filtering
+GET /api/jobs/{id}/artifacts    # List samples
+GET /api/jobs/{id}/debug-bundle # Download debug ZIP
 ```
 
 ---
 
 ## Environment Variables
 
-### Required
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `ISENGARD_MODE` | Operating mode | `fast-test` or `production` |
-| `DATA_DIR` | Persistent data directory | `/data` or `/runpod-volume/data` |
-| `REDIS_URL` | Redis connection for job queue | `redis://localhost:6379` |
-
-### Optional
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | Minimum log level | `INFO` |
-| `LOG_DIR` | Log file directory | `./logs` |
-| `API_PORT` | Backend API port | `8000` |
-| `WORKER_CONCURRENCY` | Max parallel jobs | `1` |
-| `COMFYUI_URL` | ComfyUI server endpoint | `http://localhost:8188` |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ISENGARD_MODE` | Yes | `fast-test` or `production` |
+| `REDIS_URL` | Yes | Redis connection string |
+| `VOLUME_ROOT` | No | Defaults to `/runpod-volume/isengard` |
+| `COMFYUI_URL` | No | Defaults to `http://localhost:8188` |
 
 ---
 
-## Common Patterns
-
-### Adding a New API Endpoint
-
-```python
-# apps/api/src/routes/example.py
-from fastapi import APIRouter, Depends
-from packages.shared.src.logging import get_logger, with_correlation_id
-
-router = APIRouter()
-logger = get_logger("api.example")
-
-@router.post("/example")
-@with_correlation_id
-async def example_endpoint(request: ExampleRequest):
-    logger.info("Processing example request", extra={"input": request.dict()})
-    # ... implementation
-    return {"status": "ok"}
-```
-
-### Adding a New Plugin
-
-1. Create interface in `packages/plugins/<type>/src/interface.py`
-2. Implement adapter in `packages/plugins/<type>/src/<adapter>.py`
-3. Register in plugin registry
-4. Add capability to matrix
-5. Add tests for interface compliance
-
----
-
-## Quick Reference Commands
+## Quick Commands
 
 ```bash
-# Run in fast-test mode
-ISENGARD_MODE=fast-test docker-compose up
+# Check status
+git status
 
-# Run in production mode
-ISENGARD_MODE=production docker-compose up
+# Run locally
+docker-compose up --build
 
-# View logs
-tail -f logs/api/$(date +%Y-%m-%d).log | jq .
+# Tail logs
+tail -f logs/api/latest/api.log | jq .
 
-# Run tests
-docker-compose exec api pytest
-docker-compose exec web npm test
-
-# Check capabilities
-python -c "from packages.shared.src.capabilities import CAPABILITIES; print(CAPABILITIES)"
+# Debug training job
+curl http://localhost:8000/api/jobs/{job_id}/logs/view?level=ERROR
 ```
 
 ---
 
-## UI Flows (Current)
-
-### Frontend Routes
-
-| Route | Page | Description |
-|-------|------|-------------|
-| `/` | Redirect | Redirects to `/characters` |
-| `/characters` | Characters | Character CRUD, image upload/view/delete |
-| `/dataset` | Dataset Manager | Global image browser with filters and bulk actions |
-| `/training` | Training | LoRA training configuration and job monitoring |
-| `/generate` | Image Generation | Prompt-based generation with advanced toggles |
-| `/video` | Video | Scaffold only (Coming Soon) |
-
-### Character Management Flow
-
-```
-Create Character → Upload Images → View/Manage Images → Start Training
-     ↓                 ↓                 ↓                   ↓
-POST /characters  POST /images    GET/DELETE /images   POST /training
-```
-
-### Image Generation Flow
-
-```
-Select Aspect Ratio → Configure Toggles → Enter Prompt → Generate
-        ↓                    ↓                 ↓            ↓
-  Update W×H         use_controlnet      prompt text   POST /generation
-                     use_ipadapter
-                     use_facedetailer
-                     use_upscale
-```
-
----
-
-## API Contracts (Current)
-
-### Character Endpoints
-
-```
-GET  /api/characters                    → List all characters
-POST /api/characters                    → Create character
-GET  /api/characters/{id}               → Get character
-PATCH /api/characters/{id}              → Update character
-DELETE /api/characters/{id}             → Delete character
-POST /api/characters/{id}/images        → Upload images (multipart)
-GET  /api/characters/{id}/images        → List images
-GET  /api/characters/{id}/images/{file} → Serve image file
-DELETE /api/characters/{id}/images/{file} → Delete image
-```
-
-### Training Endpoints
-
-```
-POST /api/training                      → Start training job
-GET  /api/training                      → List jobs
-GET  /api/training/{id}                 → Get job status
-GET  /api/training/{id}/stream          → SSE progress stream
-POST /api/training/{id}/cancel          → Cancel job
-```
-
-### Generation Endpoints
-
-```
-POST /api/generation                    → Start generation job
-GET  /api/generation                    → List jobs
-GET  /api/generation/{id}               → Get job status
-GET  /api/generation/{id}/stream        → SSE progress stream
-POST /api/generation/{id}/cancel        → Cancel job
-```
-
-### Generation Request Schema
-
-```typescript
-interface GenerationConfig {
-  prompt: string
-  negative_prompt: string
-  width: number          // 512-2048
-  height: number         // 512-2048
-  steps: number          // 1-100
-  guidance_scale: number // 1-20
-  seed: number | null
-  lora_id: string | null
-  lora_strength: number  // 0-1.5
-  // Advanced toggles
-  use_controlnet: boolean
-  use_ipadapter: boolean
-  use_facedetailer: boolean
-  use_upscale: boolean
-}
-```
-
----
-
-## ComfyUI Workflow Architecture
-
-### FLUX Model Requirements
-
-FLUX models use a **disaggregated architecture** with separate components:
-
-| Component | Node Type | Model File |
-|-----------|-----------|------------|
-| UNET | `UNETLoader` | `flux1-dev.safetensors` or `flux1-schnell.safetensors` |
-| CLIP-L | `DualCLIPLoader` | `clip_l.safetensors` |
-| T5-XXL | `DualCLIPLoader` | `t5xxl_fp16.safetensors` |
-| VAE | `VAELoader` | `ae.safetensors` |
-
-### Workflow Files
-
-| Workflow | Use Case | Key Nodes |
-|----------|----------|-----------|
-| `flux-schnell.json` | Fast generation (4 steps) | UNETLoader, DualCLIPLoader, VAELoader |
-| `flux-dev.json` | Quality generation (20 steps) | Same as schnell |
-| `flux-schnell-lora.json` | Fast + LoRA | + LoraLoaderModelOnly |
-| `flux-dev-lora.json` | Quality + LoRA | + LoraLoaderModelOnly |
-
-### Template Processing
-
-Workflows use placeholder values that are replaced at runtime:
-
-```python
-# In comfyui.py _load_workflow()
-workflow_text = re.sub(r'{{WIDTH}}', '512', workflow_text)
-workflow_text = re.sub(r'{{HEIGHT}}', '512', workflow_text)
-# ... etc
-
-# In _inject_parameters()
-workflow_str = workflow_str.replace('"width": 512', f'"width": {config.width}')
-```
-
----
-
-*This document is the source of truth for project conventions. Update it when patterns change.*
+*Update this document when patterns change.*
