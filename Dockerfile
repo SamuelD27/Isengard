@@ -176,7 +176,7 @@ COPY start.sh /start.sh
 COPY deploy/runpod/secrets.sh /secrets.sh
 
 # Create version marker for verification
-RUN echo "BOOTSTRAP_VERSION=v2.1.0-nginx-aitoolkit BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
+RUN echo "BOOTSTRAP_VERSION=v2.2.2-loop-fix BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
     && sha256sum /start.sh >> /app/BOOTSTRAP_VERSION
 
 # Copy helper scripts for pod management

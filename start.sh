@@ -8,6 +8,9 @@
 
 set -e
 
+# Trap to prevent script from exiting on arithmetic with zero
+# This is needed because ((var++)) returns 1 when var is 0
+
 # ============================================================
 # LOAD SECRETS (from bundled secrets file)
 # ============================================================
@@ -54,8 +57,8 @@ header() { echo -e "\n${BLUE}=== $1 ===${NC}\n"; }
 # ============================================================
 # STARTUP BANNER
 # ============================================================
-SCRIPT_VERSION="v2.2.1-live-progress"
-BUILD_DATE="2025-12-29"
+SCRIPT_VERSION="v2.2.2-loop-fix"
+BUILD_DATE="2025-12-30"
 
 # Generate SHA256 of this script for verification
 SCRIPT_SHA=$(sha256sum /start.sh 2>/dev/null | cut -c1-12 || echo "unknown")
@@ -679,10 +682,10 @@ for model in "${REQUIRED_MODELS[@]}"; do
         # Get file size in human-readable format
         size=$(ls -lh "$model" 2>/dev/null | awk '{print $5}')
         echo "  ✓ ${model_name} (${size})"
-        ((MODELS_OK++))
+        MODELS_OK=$((MODELS_OK + 1))
     else
         echo "  ✗ ${model_name} MISSING"
-        ((MODELS_MISSING++))
+        MODELS_MISSING=$((MODELS_MISSING + 1))
     fi
 done
 
