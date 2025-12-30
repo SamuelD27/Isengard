@@ -173,14 +173,19 @@ async def view_job_logs(
 
     Returns structured log entries for display in the UI.
     Supports filtering by level, event type, and text search.
+
+    Returns an empty entries list if no logs are available yet.
     """
     validate_job_id(job_id)
 
     log_path = get_job_log_path(job_id)
     if log_path is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Log file for job '{job_id}' not found."
+        # Return empty response instead of 404 - logs may not be available yet
+        return JobLogsResponse(
+            job_id=job_id,
+            entries=[],
+            total_lines=0,
+            has_more=False,
         )
 
     entries = []

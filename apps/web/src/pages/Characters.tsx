@@ -13,7 +13,7 @@ import {
   Loader2,
   Sparkles,
   Check,
-  
+
   Wand2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -21,6 +21,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { api, Character, GenerationJob } from '@/lib/api'
 import { useNavigate } from 'react-router-dom'
 
@@ -47,6 +48,14 @@ export default function CharactersPage() {
   })
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([])
   const [isUploading, setIsUploading] = useState(false)
+  const [formErrors, setFormErrors] = useState<{ name?: string; trigger_word?: string }>({})
+
+  // Confirm dialog state
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    open: boolean
+    characterId: string
+    characterName: string
+  }>({ open: false, characterId: '', characterName: '' })
 
   const { data: characters = [], isLoading } = useQuery({
     queryKey: ['characters'],
@@ -86,14 +95,33 @@ export default function CharactersPage() {
   })
 
   const handleCreate = () => {
-    if (newCharacter.name && newCharacter.trigger_word) {
-      createMutation.mutate(newCharacter)
+    // Validate form
+    const errors: { name?: string; trigger_word?: string } = {}
+    if (!newCharacter.name.trim()) {
+      errors.name = 'Name is required'
     }
+    if (!newCharacter.trigger_word.trim()) {
+      errors.trigger_word = 'Trigger word is required'
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors)
+      return
+    }
+
+    setFormErrors({})
+    createMutation.mutate(newCharacter)
+  }
+
+  const handleDeleteCharacter = (characterId: string) => {
+    deleteMutation.mutate(characterId)
+    setDeleteConfirm({ open: false, characterId: '', characterName: '' })
   }
 
   const handleCancelCreate = () => {
     setIsCreating(false)
     setNewCharacter({ name: '', description: '', trigger_word: '' })
+    setFormErrors({})
     pendingImages.forEach(p => URL.revokeObjectURL(p.preview))
     setPendingImages([])
   }
@@ -151,27 +179,42 @@ export default function CharactersPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Name</Label>
+              <Label htmlFor="name">Name <span className="text-destructive">*</span></Label>
               <Input
                 id="name"
                 data-testid="character-name-input"
                 placeholder="e.g., John Smith"
                 value={newCharacter.name}
-                onChange={(e) => setNewCharacter({ ...newCharacter, name: e.target.value })}
+                onChange={(e) => {
+                  setNewCharacter({ ...newCharacter, name: e.target.value })
+                  if (formErrors.name) setFormErrors(prev => ({ ...prev, name: undefined }))
+                }}
+                className={formErrors.name ? 'border-destructive' : ''}
               />
+              {formErrors.name && (
+                <p className="text-xs text-destructive">{formErrors.name}</p>
+              )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="trigger">Trigger Word</Label>
+              <Label htmlFor="trigger">Trigger Word <span className="text-destructive">*</span></Label>
               <Input
                 id="trigger"
                 data-testid="character-trigger-input"
                 placeholder="e.g., johnsmith_person"
                 value={newCharacter.trigger_word}
-                onChange={(e) => setNewCharacter({ ...newCharacter, trigger_word: e.target.value })}
+                onChange={(e) => {
+                  setNewCharacter({ ...newCharacter, trigger_word: e.target.value })
+                  if (formErrors.trigger_word) setFormErrors(prev => ({ ...prev, trigger_word: undefined }))
+                }}
+                className={formErrors.trigger_word ? 'border-destructive' : ''}
               />
-              <p className="text-xs text-muted-foreground">
-                Unique word used in prompts to activate this character's likeness
-              </p>
+              {formErrors.trigger_word ? (
+                <p className="text-xs text-destructive">{formErrors.trigger_word}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Unique word used in prompts to activate this character's likeness
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <Label htmlFor="description">Description (optional)</Label>
@@ -317,17 +360,32 @@ export default function CharactersPage() {
 
   if (selectedCharacter) {
     return (
-      <CharacterDetailView
-        character={selectedCharacter}
-        onBack={() => setSelectedCharacter(null)}
-        onDelete={() => {
-          if (confirm(`Delete "${selectedCharacter.name}"? This will also delete all training images.`)) {
-            deleteMutation.mutate(selectedCharacter.id)
-          }
-        }}
-        onUpload={(e) => handleUploadToCharacter(e, selectedCharacter.id)}
-        onStartTraining={() => navigate('/training')}
-      />
+      <>
+        <CharacterDetailView
+          character={selectedCharacter}
+          onBack={() => setSelectedCharacter(null)}
+          onDelete={() => {
+            setDeleteConfirm({
+              open: true,
+              characterId: selectedCharacter.id,
+              characterName: selectedCharacter.name,
+            })
+          }}
+          onUpload={(e) => handleUploadToCharacter(e, selectedCharacter.id)}
+          onStartTraining={() => navigate('/training')}
+          isDeleting={deleteMutation.isPending}
+        />
+        <ConfirmDialog
+          open={deleteConfirm.open}
+          onOpenChange={(open) => setDeleteConfirm(prev => ({ ...prev, open }))}
+          title="Delete Character"
+          description={`Are you sure you want to delete "${deleteConfirm.characterName}"? This will also delete all training images and cannot be undone.`}
+          confirmLabel="Delete"
+          variant="destructive"
+          onConfirm={() => handleDeleteCharacter(deleteConfirm.characterId)}
+          isLoading={deleteMutation.isPending}
+        />
+      </>
     )
   }
 
@@ -374,14 +432,27 @@ export default function CharactersPage() {
               onClick={() => setSelectedCharacter(character)}
               onUpload={(e) => handleUploadToCharacter(e, character.id)}
               onDelete={() => {
-                if (confirm(`Delete "${character.name}"?`)) {
-                  deleteMutation.mutate(character.id)
-                }
+                setDeleteConfirm({
+                  open: true,
+                  characterId: character.id,
+                  characterName: character.name,
+                })
               }}
               onTrain={() => navigate('/training')}
+              isDeleting={deleteMutation.isPending && deleteConfirm.characterId === character.id}
             />
           ))}
         </div>
+        <ConfirmDialog
+          open={deleteConfirm.open}
+          onOpenChange={(open) => setDeleteConfirm(prev => ({ ...prev, open }))}
+          title="Delete Character"
+          description={`Are you sure you want to delete "${deleteConfirm.characterName}"? This will also delete all training images and cannot be undone.`}
+          confirmLabel="Delete"
+          variant="destructive"
+          onConfirm={() => handleDeleteCharacter(deleteConfirm.characterId)}
+          isLoading={deleteMutation.isPending}
+        />
       )}
     </div>
   )
@@ -393,9 +464,10 @@ interface CharacterCardProps {
   onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void
   onDelete: () => void
   onTrain: () => void
+  isDeleting?: boolean
 }
 
-function CharacterCard({ character, onClick, onUpload, onDelete, onTrain }: CharacterCardProps) {
+function CharacterCard({ character, onClick, onUpload, onDelete, onTrain, isDeleting }: CharacterCardProps) {
   return (
     <Card className="hover:border-border-hover transition-colors" data-testid="character-card" data-character-id={character.id}>
       <CardHeader className="pb-2">
@@ -455,9 +527,14 @@ function CharacterCard({ character, onClick, onUpload, onDelete, onTrain }: Char
           size="icon"
           className="text-muted-foreground hover:text-destructive"
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          disabled={isDeleting}
           data-testid="delete-character-btn"
         >
-          <Trash2 className="h-4 w-4" />
+          {isDeleting ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Trash2 className="h-4 w-4" />
+          )}
         </Button>
       </CardFooter>
     </Card>
@@ -470,9 +547,10 @@ interface CharacterDetailViewProps {
   onDelete: () => void
   onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void
   onStartTraining: () => void
+  isDeleting?: boolean
 }
 
-function CharacterDetailView({ character, onBack, onDelete, onUpload, onStartTraining }: CharacterDetailViewProps) {
+function CharacterDetailView({ character, onBack, onDelete, onUpload, onStartTraining, isDeleting }: CharacterDetailViewProps) {
   const queryClient = useQueryClient()
   const [deletingImage, setDeletingImage] = useState<string | null>(null)
   const [showSynthetic, setShowSynthetic] = useState(false)
@@ -550,8 +628,13 @@ function CharacterDetailView({ character, onBack, onDelete, onUpload, onStartTra
             size="icon"
             className="text-muted-foreground hover:text-destructive"
             onClick={onDelete}
+            disabled={isDeleting}
           >
-            <Trash2 className="h-4 w-4" />
+            {isDeleting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
           </Button>
         </div>
       </div>

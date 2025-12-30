@@ -45,6 +45,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { api, Character, GPUMetrics } from '@/lib/api'
 
 interface LogEntry {
@@ -105,6 +106,7 @@ export default function TrainingDetailPage() {
   const [copiedId, setCopiedId] = useState(false)
   const [selectedSample, setSelectedSample] = useState<SampleImage | null>(null)
   const [gpuMetrics, setGpuMetrics] = useState<GPUMetrics | null>(null)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
 
   const logsEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -368,10 +370,14 @@ export default function TrainingDetailPage() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => cancelMutation.mutate(job.id)}
+              onClick={() => setShowCancelConfirm(true)}
               disabled={cancelMutation.isPending}
             >
-              <Square className="h-4 w-4 mr-2" />
+              {cancelMutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Square className="h-4 w-4 mr-2" />
+              )}
               Cancel
             </Button>
           )}
@@ -698,6 +704,21 @@ export default function TrainingDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Cancel Training Confirmation Dialog */}
+      <ConfirmDialog
+        open={showCancelConfirm}
+        onOpenChange={setShowCancelConfirm}
+        title="Cancel Training"
+        description="Are you sure you want to cancel this training job? This action cannot be undone and any progress will be lost."
+        confirmLabel="Cancel Training"
+        variant="destructive"
+        onConfirm={() => {
+          cancelMutation.mutate(job.id)
+          setShowCancelConfirm(false)
+        }}
+        isLoading={cancelMutation.isPending}
+      />
     </div>
   )
 }
