@@ -2,11 +2,13 @@
  * Training Detail Page
  *
  * Full page view for a specific training job with:
- * - Real-time progress via SSE
- * - Live logs viewer with filtering
+ * - Real-time progress via SSE with exponential backoff reconnection
+ * - Live logs viewer with filtering and search
  * - Sample images gallery
+ * - Checkpoints panel with download
  * - GPU stats panel
  * - Metrics display (loss, step, ETA, iteration speed)
+ * - Log-derived progress with API fallback
  * - Debug bundle download
  *
  * Works for:
@@ -15,7 +17,7 @@
  * - Succeeded jobs (static final state + artifacts)
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -27,11 +29,9 @@ import {
   RefreshCw,
   Square,
   Terminal,
-  Image as ImageIcon,
   Clock,
   Gauge,
   Bug,
-  Maximize2,
   X,
   Cpu,
   Thermometer,
@@ -39,6 +39,7 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  Search,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
@@ -47,6 +48,8 @@ import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { LossChart } from '@/components/training/LossChart'
+import { CheckpointsPanel } from '@/components/training/CheckpointsPanel'
+import { SampleImagesPanel } from '@/components/training/SampleImagesPanel'
 import { api, Character, GPUMetrics } from '@/lib/api'
 
 interface LogEntry {
@@ -55,31 +58,6 @@ interface LogEntry {
   message: string
   event?: string
   fields?: Record<string, unknown>
-}
-
-interface SampleImage {
-  name: string
-  url: string
-  step: number | null
-  created_at: string
-}
-
-interface ProgressEvent {
-  job_id: string
-  status: string
-  stage?: string
-  step: number
-  steps_total: number
-  progress_pct: number
-  loss?: number
-  lr?: number
-  eta_seconds?: number
-  message: string
-  sample_path?: string
-  error?: string
-  error_type?: string
-  timestamp?: string
-  gpu?: GPUMetrics
 }
 
 function formatDuration(seconds: number): string {
@@ -94,25 +72,39 @@ function formatDuration(seconds: number): string {
   return `${hours}h ${mins}m`
 }
 
+// SSE reconnection with exponential backoff
+const SSE_INITIAL_RETRY_DELAY = 1000
+const SSE_MAX_RETRY_DELAY = 30000
+const SSE_BACKOFF_MULTIPLIER = 2
+
 export default function TrainingDetailPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [samples, setSamples] = useState<SampleImage[]>([])
   const [sseConnected, setSseConnected] = useState(false)
   const [sseError, setSseError] = useState<string | null>(null)
+  const [sseRetryCountdown, setSseRetryCountdown] = useState<number | null>(null)
   const [logFilter, setLogFilter] = useState<'all' | 'info' | 'error'>('all')
+  const [logSearch, setLogSearch] = useState('')
   const [copiedId, setCopiedId] = useState(false)
-  const [selectedSample, setSelectedSample] = useState<SampleImage | null>(null)
   const [gpuMetrics, setGpuMetrics] = useState<GPUMetrics | null>(null)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [lossHistory, setLossHistory] = useState<{ step: number; loss: number }[]>([])
   const [autoScroll, setAutoScroll] = useState(true)
+  const [lastLogTime, setLastLogTime] = useState<Date | null>(null)
+
+  // Log-derived progress state
+  const [logDerivedStep, setLogDerivedStep] = useState<number>(0)
+  const [logDerivedTotal, setLogDerivedTotal] = useState<number>(0)
+  const [usingLogProgress, setUsingLogProgress] = useState(false)
 
   const logsEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
+  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const retryDelayRef = useRef<number>(SSE_INITIAL_RETRY_DELAY)
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // Fetch job data
   const { data: job, isLoading: jobLoading, error: jobError } = useQuery({
@@ -128,29 +120,19 @@ export default function TrainingDetailPage() {
     },
   })
 
-  // Fetch character for name
+  // Fetch character for name and trigger word
   const { data: characters = [] } = useQuery({
     queryKey: ['characters'],
     queryFn: api.listCharacters,
   })
 
-  const characterName = job
-    ? characters.find((c: Character) => c.id === job.character_id)?.name || 'Unknown'
-    : 'Loading...'
+  const character = job
+    ? characters.find((c: Character) => c.id === job.character_id)
+    : null
+  const characterName = character?.name || 'Unknown'
+  const triggerWord = character?.trigger_word || null
 
   const isActive = job && ['running', 'queued', 'pending'].includes(job.status)
-
-  // Fetch artifacts (samples)
-  const { data: artifacts, refetch: refetchArtifacts } = useQuery({
-    queryKey: ['job-artifacts', jobId],
-    queryFn: async () => {
-      const response = await fetch(`/api/jobs/${jobId}/artifacts`)
-      if (!response.ok) return { artifacts: [] }
-      return response.json()
-    },
-    enabled: !!jobId,
-    refetchInterval: isActive ? 5000 : false,
-  })
 
   // Fetch logs
   const { data: logsData, refetch: refetchLogs } = useQuery({
@@ -173,31 +155,51 @@ export default function TrainingDetailPage() {
     },
   })
 
-  // Update samples from artifacts
-  useEffect(() => {
-    if (artifacts?.artifacts) {
-      const sampleArtifacts = artifacts.artifacts
-        .filter((a: { type: string }) => a.type === 'sample')
-        .map((a: { name: string; url: string; step: number; created_at: string }) => ({
-          name: a.name,
-          url: a.url,
-          step: a.step,
-          created_at: a.created_at,
-        }))
-      setSamples(sampleArtifacts)
-    }
-  }, [artifacts])
-
   // Update logs from API response
   useEffect(() => {
     if (logsData?.entries) {
       setLogs(logsData.entries)
+      if (logsData.entries.length > 0) {
+        const lastEntry = logsData.entries[logsData.entries.length - 1]
+        setLastLogTime(new Date(lastEntry.timestamp))
+      }
     }
   }, [logsData])
 
-  // SSE Connection for real-time updates
-  useEffect(() => {
+  // Parse progress from log messages
+  const parseProgressFromMessage = useCallback((message: string) => {
+    // Pattern: "Step 123/500" or "step 123 / 500" etc.
+    const stepMatch = message.match(/[Ss]tep\s*(\d+)\s*[/]\s*(\d+)/)
+    if (stepMatch) {
+      const current = parseInt(stepMatch[1], 10)
+      const total = parseInt(stepMatch[2], 10)
+      if (current > 0 && total > 0) {
+        setLogDerivedStep(current)
+        setLogDerivedTotal(total)
+        setUsingLogProgress(true)
+      }
+    }
+  }, [])
+
+  // SSE Connection with exponential backoff reconnection
+  const connectSSE = useCallback(() => {
     if (!isActive || !jobId) return
+
+    // Clear any pending retry
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current)
+      retryTimeoutRef.current = null
+    }
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current)
+      countdownIntervalRef.current = null
+    }
+    setSseRetryCountdown(null)
+
+    // Close existing connection
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+    }
 
     const eventSource = new EventSource(`/api/jobs/${jobId}/stream`)
     eventSourceRef.current = eventSource
@@ -205,6 +207,10 @@ export default function TrainingDetailPage() {
     eventSource.onopen = () => {
       setSseConnected(true)
       setSseError(null)
+      retryDelayRef.current = SSE_INITIAL_RETRY_DELAY // Reset on success
+
+      // Fetch historical logs to catch up
+      refetchLogs()
     }
 
     eventSource.addEventListener('progress', (e) => {
@@ -226,7 +232,6 @@ export default function TrainingDetailPage() {
 
         // Extract step info (handles both formats)
         const currentStep = data.step || data.current_step || 0
-        const totalSteps = data.steps_total || data.total_steps || 0
         const currentLoss = data.loss || data.current_loss
 
         // Update loss history for chart
@@ -242,6 +247,11 @@ export default function TrainingDetailPage() {
           })
         }
 
+        // Parse progress from message
+        if (data.message) {
+          parseProgressFromMessage(data.message)
+        }
+
         // Add log entry for every step with progress info
         if (data.message && currentStep > 0) {
           setLogs(prev => {
@@ -250,7 +260,7 @@ export default function TrainingDetailPage() {
             if (lastLog?.fields?.step === currentStep) {
               return prev
             }
-            return [...prev.slice(-500), {
+            const newLogs = [...prev.slice(-500), {
               timestamp: data.timestamp || new Date().toISOString(),
               level: 'INFO',
               message: data.message,
@@ -263,12 +273,9 @@ export default function TrainingDetailPage() {
                 eta_seconds: data.eta_seconds,
               },
             }]
+            setLastLogTime(new Date())
+            return newLogs
           })
-        }
-
-        // Check for new sample
-        if (data.sample_path) {
-          refetchArtifacts()
         }
 
         // Invalidate job query to get latest data
@@ -282,22 +289,64 @@ export default function TrainingDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['training-job', jobId] })
       queryClient.invalidateQueries({ queryKey: ['training-jobs-ongoing'] })
       queryClient.invalidateQueries({ queryKey: ['training-jobs-successful'] })
-      refetchArtifacts()
       refetchLogs()
       eventSource.close()
       setSseConnected(false)
     })
 
     eventSource.onerror = () => {
-      setSseError('Connection lost. Reconnecting...')
-      setSseConnected(false)
-    }
-
-    return () => {
       eventSource.close()
       setSseConnected(false)
+
+      // Calculate next retry delay with exponential backoff
+      const nextDelay = Math.min(
+        retryDelayRef.current * SSE_BACKOFF_MULTIPLIER,
+        SSE_MAX_RETRY_DELAY
+      )
+
+      setSseError(`Connection lost. Reconnecting in ${Math.ceil(retryDelayRef.current / 1000)}s...`)
+      setSseRetryCountdown(Math.ceil(retryDelayRef.current / 1000))
+
+      // Start countdown
+      let countdown = Math.ceil(retryDelayRef.current / 1000)
+      countdownIntervalRef.current = setInterval(() => {
+        countdown -= 1
+        if (countdown > 0) {
+          setSseRetryCountdown(countdown)
+          setSseError(`Connection lost. Reconnecting in ${countdown}s...`)
+        }
+      }, 1000)
+
+      // Schedule retry
+      retryTimeoutRef.current = setTimeout(() => {
+        if (countdownIntervalRef.current) {
+          clearInterval(countdownIntervalRef.current)
+        }
+        setSseRetryCountdown(null)
+        connectSSE()
+      }, retryDelayRef.current)
+
+      retryDelayRef.current = nextDelay
     }
-  }, [jobId, isActive, queryClient, refetchArtifacts, refetchLogs])
+  }, [jobId, isActive, queryClient, refetchLogs, parseProgressFromMessage])
+
+  // Start SSE connection
+  useEffect(() => {
+    connectSSE()
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+      }
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current)
+      }
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current)
+      }
+      setSseConnected(false)
+    }
+  }, [connectSSE])
 
   // Auto-scroll logs when enabled
   useEffect(() => {
@@ -315,12 +364,41 @@ export default function TrainingDetailPage() {
     }
   }, [jobId])
 
-  // Filter logs
-  const filteredLogs = logs.filter(log => {
-    if (logFilter === 'all') return true
-    if (logFilter === 'error') return log.level === 'ERROR' || log.level === 'WARNING'
-    return log.level === 'INFO'
-  })
+  // Filter and search logs
+  const filteredLogs = useMemo(() => {
+    return logs.filter(log => {
+      // Level filter
+      if (logFilter === 'error' && log.level !== 'ERROR' && log.level !== 'WARNING') {
+        return false
+      }
+      if (logFilter === 'info' && log.level !== 'INFO') {
+        return false
+      }
+      // Text search
+      if (logSearch && !log.message.toLowerCase().includes(logSearch.toLowerCase())) {
+        return false
+      }
+      return true
+    })
+  }, [logs, logFilter, logSearch])
+
+  // Calculate effective progress - prefer log-derived, fallback to API
+  const effectiveProgress = useMemo(() => {
+    if (usingLogProgress && logDerivedTotal > 0) {
+      return {
+        current: logDerivedStep,
+        total: logDerivedTotal,
+        percent: (logDerivedStep / logDerivedTotal) * 100,
+        source: 'log' as const,
+      }
+    }
+    return {
+      current: job?.current_step || 0,
+      total: job?.total_steps || 0,
+      percent: job?.progress || 0,
+      source: 'api' as const,
+    }
+  }, [usingLogProgress, logDerivedStep, logDerivedTotal, job])
 
   // Status colors
   const statusColors: Record<string, string> = {
@@ -342,6 +420,20 @@ export default function TrainingDetailPage() {
         return <X className="h-5 w-5 text-muted-foreground" />
       default:
         return <Loader2 className="h-5 w-5 text-accent animate-spin" />
+    }
+  }
+
+  // Log level colors
+  const getLogLevelClass = (level: string) => {
+    switch (level) {
+      case 'ERROR':
+        return 'text-red-400 bg-red-500/10'
+      case 'WARNING':
+        return 'text-yellow-400 bg-yellow-500/10'
+      case 'DEBUG':
+        return 'text-gray-500'
+      default:
+        return 'text-muted-foreground'
     }
   }
 
@@ -386,6 +478,11 @@ export default function TrainingDetailPage() {
             <div>
               <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
                 {characterName}
+                {triggerWord && (
+                  <span className="text-sm font-normal text-muted-foreground">
+                    (trigger: {triggerWord})
+                  </span>
+                )}
                 <Badge className={statusColors[job.status]}>{job.status}</Badge>
                 {sseConnected && (
                   <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
@@ -450,15 +547,20 @@ export default function TrainingDetailPage() {
           {/* Progress Card */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Progress</CardTitle>
+              <CardTitle className="text-sm flex items-center gap-2">
+                Progress
+                {effectiveProgress.source === 'log' && (
+                  <span className="text-xs font-normal text-green-500">(live)</span>
+                )}
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Progress value={job.progress} className="h-3" />
+              <Progress value={effectiveProgress.percent} className="h-3" />
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">
-                  Step {job.current_step} / {job.total_steps}
+                  Step {effectiveProgress.current} / {effectiveProgress.total}
                 </span>
-                <span className="font-medium">{job.progress.toFixed(1)}%</span>
+                <span className="font-medium">{effectiveProgress.percent.toFixed(1)}%</span>
               </div>
             </CardContent>
           </Card>
@@ -542,16 +644,12 @@ export default function TrainingDetailPage() {
             </CardContent>
           </Card>
 
-          {/* Config Summary */}
+          {/* Config Summary - without base model per spec */}
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-sm">Configuration</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Base Model</span>
-                <span>{job.base_model || 'flux-dev'}</span>
-              </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Preset</span>
                 <span>{job.preset_name ? job.preset_name.charAt(0).toUpperCase() + job.preset_name.slice(1) : 'Custom'}</span>
@@ -574,6 +672,9 @@ export default function TrainingDetailPage() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Checkpoints Panel */}
+          <CheckpointsPanel jobId={job.id} isActive={!!isActive} />
 
           {/* Error Display */}
           {job.status === 'failed' && job.error_message && (
@@ -598,59 +699,41 @@ export default function TrainingDetailPage() {
 
         {/* Right Column - Logs & Samples (spans 2 cols) */}
         <div className="lg:col-span-2 space-y-4">
-          {/* Samples Gallery */}
-          {samples.length > 0 && (
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <ImageIcon className="h-4 w-4" />
-                  Sample Images ({samples.length})
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex gap-3 overflow-x-auto pb-2">
-                  {samples.map((sample) => (
-                    <button
-                      key={sample.name}
-                      onClick={() => setSelectedSample(sample)}
-                      className="flex-shrink-0 relative group"
-                    >
-                      <img
-                        src={sample.url}
-                        alt={sample.name}
-                        className="h-24 w-24 object-cover rounded border border-border hover:border-accent transition-colors"
-                      />
-                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded flex items-center justify-center">
-                        <Maximize2 className="h-5 w-5 text-white" />
-                      </div>
-                      {sample.step && (
-                        <span className="absolute bottom-1 right-1 text-xs bg-black/70 text-white px-1 rounded">
-                          #{sample.step}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {/* Sample Images Panel */}
+          <SampleImagesPanel jobId={job.id} isActive={!!isActive} />
 
           {/* Loss Chart */}
           <LossChart
             data={lossHistory}
-            currentStep={job.current_step}
-            totalSteps={job.total_steps}
+            currentStep={effectiveProgress.current}
+            totalSteps={effectiveProgress.total}
           />
 
           {/* Logs */}
           <Card className="flex-1">
             <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <CardTitle className="text-sm flex items-center gap-2">
                   <Terminal className="h-4 w-4" />
                   Logs ({filteredLogs.length})
+                  {lastLogTime && (
+                    <span className="text-xs font-normal text-muted-foreground">
+                      (last: {lastLogTime.toLocaleTimeString()})
+                    </span>
+                  )}
                 </CardTitle>
                 <div className="flex items-center gap-3">
+                  {/* Search input */}
+                  <div className="relative">
+                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
+                    <input
+                      type="text"
+                      placeholder="Search logs..."
+                      value={logSearch}
+                      onChange={(e) => setLogSearch(e.target.value)}
+                      className="text-xs bg-input border border-border rounded pl-7 pr-2 py-1 w-32 focus:w-48 transition-all focus:outline-none focus:ring-1 focus:ring-accent"
+                    />
+                  </div>
                   <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer">
                     <input
                       type="checkbox"
@@ -684,18 +767,14 @@ export default function TrainingDetailPage() {
               <ScrollArea className="h-96 rounded border border-border bg-background p-3">
                 <div className="font-mono text-xs space-y-1">
                   {filteredLogs.length === 0 ? (
-                    <p className="text-muted-foreground">No logs yet...</p>
+                    <p className="text-muted-foreground">
+                      {logs.length === 0 ? 'No logs yet...' : 'No logs match your filter.'}
+                    </p>
                   ) : (
                     filteredLogs.map((log, i) => (
                       <div
                         key={i}
-                        className={`py-0.5 ${
-                          log.level === 'ERROR'
-                            ? 'text-red-400'
-                            : log.level === 'WARNING'
-                            ? 'text-yellow-400'
-                            : 'text-muted-foreground'
-                        }`}
+                        className={`py-0.5 px-1 rounded ${getLogLevelClass(log.level)}`}
                       >
                         <span className="text-muted-foreground/50">
                           {new Date(log.timestamp).toLocaleTimeString()}
@@ -727,38 +806,11 @@ export default function TrainingDetailPage() {
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 bg-muted rounded-full border border-border shadow-lg flex items-center gap-2 text-xs">
           <span className={`w-2 h-2 rounded-full ${sseConnected ? 'bg-green-500' : 'bg-yellow-500'}`} />
           <span className="text-muted-foreground">
-            {sseConnected ? 'Live updates connected' : 'Reconnecting...'}
+            {sseConnected ? 'Live updates connected' : sseError || 'Reconnecting...'}
           </span>
-          {sseError && (
-            <span className="text-yellow-400">{sseError}</span>
+          {sseRetryCountdown !== null && (
+            <span className="text-yellow-400">({sseRetryCountdown}s)</span>
           )}
-        </div>
-      )}
-
-      {/* Sample Image Modal */}
-      {selectedSample && (
-        <div
-          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-8"
-          onClick={() => setSelectedSample(null)}
-        >
-          <div className="relative max-w-4xl max-h-full">
-            <img
-              src={selectedSample.url}
-              alt={selectedSample.name}
-              className="max-w-full max-h-[80vh] object-contain rounded"
-            />
-            <div className="absolute bottom-4 left-4 bg-black/70 text-white px-3 py-1 rounded text-sm">
-              {selectedSample.step && `Step ${selectedSample.step}`}
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="absolute top-4 right-4"
-              onClick={() => setSelectedSample(null)}
-            >
-              <X className="h-5 w-5" />
-            </Button>
-          </div>
         </div>
       )}
 

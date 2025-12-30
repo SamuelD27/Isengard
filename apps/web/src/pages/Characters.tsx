@@ -424,35 +424,37 @@ export default function CharactersPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3" data-testid="character-grid">
-          {characters.map((character: Character) => (
-            <CharacterCard
-              key={character.id}
-              character={character}
-              onClick={() => setSelectedCharacter(character)}
-              onUpload={(e) => handleUploadToCharacter(e, character.id)}
-              onDelete={() => {
-                setDeleteConfirm({
-                  open: true,
-                  characterId: character.id,
-                  characterName: character.name,
-                })
-              }}
-              onTrain={() => navigate('/training')}
-              isDeleting={deleteMutation.isPending && deleteConfirm.characterId === character.id}
-            />
-          ))}
-        </div>
-        <ConfirmDialog
-          open={deleteConfirm.open}
-          onOpenChange={(open) => setDeleteConfirm(prev => ({ ...prev, open }))}
-          title="Delete Character"
-          description={`Are you sure you want to delete "${deleteConfirm.characterName}"? This will also delete all training images and cannot be undone.`}
-          confirmLabel="Delete"
-          variant="destructive"
-          onConfirm={() => handleDeleteCharacter(deleteConfirm.characterId)}
-          isLoading={deleteMutation.isPending}
-        />
+        <>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3" data-testid="character-grid">
+            {characters.map((character: Character) => (
+              <CharacterCard
+                key={character.id}
+                character={character}
+                onClick={() => setSelectedCharacter(character)}
+                onUpload={(e) => handleUploadToCharacter(e, character.id)}
+                onDelete={() => {
+                  setDeleteConfirm({
+                    open: true,
+                    characterId: character.id,
+                    characterName: character.name,
+                  })
+                }}
+                onTrain={() => navigate('/training')}
+                isDeleting={deleteMutation.isPending && deleteConfirm.characterId === character.id}
+              />
+            ))}
+          </div>
+          <ConfirmDialog
+            open={deleteConfirm.open}
+            onOpenChange={(open) => setDeleteConfirm(prev => ({ ...prev, open }))}
+            title="Delete Character"
+            description={`Are you sure you want to delete "${deleteConfirm.characterName}"? This will also delete all training images and cannot be undone.`}
+            confirmLabel="Delete"
+            variant="destructive"
+            onConfirm={() => handleDeleteCharacter(deleteConfirm.characterId)}
+            isLoading={deleteMutation.isPending}
+          />
+        </>
       )}
     </div>
   )

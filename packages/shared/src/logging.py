@@ -578,6 +578,17 @@ def get_job_samples_dir(job_id: str) -> Path:
     return samples_dir
 
 
+def get_job_checkpoints_dir(job_id: str) -> Path:
+    """
+    Get the checkpoints directory for a job.
+
+    Creates the directory if it doesn't exist.
+    """
+    checkpoints_dir = get_job_artifacts_dir(job_id) / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    return checkpoints_dir
+
+
 class TrainingJobLogger(JobLogger):
     """
     Enhanced job logger specifically for training jobs.

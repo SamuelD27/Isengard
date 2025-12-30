@@ -29,7 +29,7 @@ interface LossChartProps {
   totalSteps?: number
 }
 
-export function LossChart({ data, currentStep, totalSteps }: LossChartProps) {
+export function LossChart({ data, currentStep: _currentStep, totalSteps }: LossChartProps) {
   // Calculate min/max for Y axis domain
   const yDomain = useMemo(() => {
     if (data.length === 0) return [0, 1]

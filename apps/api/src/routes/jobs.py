@@ -28,6 +28,7 @@ from packages.shared.src.logging import (
     get_job_log_path,
     get_job_artifacts_dir,
     get_job_samples_dir,
+    get_job_checkpoints_dir,
     get_correlation_id,
     redact_sensitive,
 )
@@ -74,6 +75,23 @@ class ArtifactListResponse(BaseModel):
     """Response for artifact listing."""
     job_id: str
     artifacts: list[ArtifactInfo]
+    total_count: int
+
+
+class CheckpointInfo(BaseModel):
+    """Information about a training checkpoint."""
+    name: str
+    path: str
+    size_bytes: int
+    created_at: str
+    step: int | None = None
+    url: str
+
+
+class CheckpointListResponse(BaseModel):
+    """Response for checkpoint listing."""
+    job_id: str
+    checkpoints: list[CheckpointInfo]
     total_count: int
 
 
@@ -271,6 +289,27 @@ async def list_job_artifacts(job_id: str):
                 url=f"/api/jobs/{job_id}/artifacts/samples/{sample_file.name}",
             ))
 
+    # Check checkpoints directory
+    checkpoints_dir = get_job_checkpoints_dir(job_id)
+    if checkpoints_dir.exists():
+        for checkpoint_file in sorted(checkpoints_dir.glob("*.safetensors")):
+            # Extract step number from filename (e.g., checkpoint_step_100.safetensors)
+            step = None
+            if match := re.search(r"(?:step[_-]?)?(\d+)", checkpoint_file.stem):
+                step = int(match.group(1))
+
+            artifacts.append(ArtifactInfo(
+                name=checkpoint_file.name,
+                path=str(checkpoint_file),
+                type="checkpoint",
+                size_bytes=checkpoint_file.stat().st_size,
+                created_at=datetime.fromtimestamp(
+                    checkpoint_file.stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+                step=step,
+                url=f"/api/jobs/{job_id}/checkpoints/{checkpoint_file.name}/download",
+            ))
+
     # Check for log file
     log_path = get_job_log_path(job_id)
     if log_path and log_path.exists():
@@ -339,6 +378,88 @@ async def get_sample_image(job_id: str, filename: str):
         path=sample_path,
         media_type="image/png",
         filename=filename,
+    )
+
+
+# ============================================
+# Checkpoint Endpoints
+# ============================================
+
+@router.get("/{job_id}/checkpoints", response_model=CheckpointListResponse)
+async def list_job_checkpoints(job_id: str):
+    """
+    List all checkpoints for a training job.
+
+    Checkpoints are intermediate model snapshots saved during training.
+    Use the download endpoint to retrieve individual checkpoints.
+    """
+    validate_job_id(job_id)
+
+    checkpoints = []
+    checkpoints_dir = get_job_checkpoints_dir(job_id)
+
+    if checkpoints_dir.exists():
+        for checkpoint_file in sorted(checkpoints_dir.glob("*.safetensors")):
+            # Extract step number from filename
+            step = None
+            if match := re.search(r"(?:step[_-]?)?(\d+)", checkpoint_file.stem):
+                step = int(match.group(1))
+
+            checkpoints.append(CheckpointInfo(
+                name=checkpoint_file.name,
+                path=str(checkpoint_file),
+                size_bytes=checkpoint_file.stat().st_size,
+                created_at=datetime.fromtimestamp(
+                    checkpoint_file.stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+                step=step,
+                url=f"/api/jobs/{job_id}/checkpoints/{checkpoint_file.name}/download",
+            ))
+
+    return CheckpointListResponse(
+        job_id=job_id,
+        checkpoints=checkpoints,
+        total_count=len(checkpoints),
+    )
+
+
+@router.get("/{job_id}/checkpoints/{filename}/download")
+async def download_checkpoint(job_id: str, filename: str):
+    """
+    Download a checkpoint file.
+
+    Streams the checkpoint file for download.
+    """
+    validate_job_id(job_id)
+
+    # Validate filename - only allow safetensors files
+    if not re.match(r"^[\w\-\.]+\.safetensors$", filename):
+        raise HTTPException(status_code=400, detail="Invalid filename. Only .safetensors files are allowed.")
+
+    checkpoints_dir = get_job_checkpoints_dir(job_id)
+    checkpoint_path = checkpoints_dir / filename
+
+    if not checkpoint_path.exists():
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+
+    # Security: verify path is within checkpoints directory
+    try:
+        checkpoint_path.resolve().relative_to(checkpoints_dir.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    logger.info(
+        "Serving checkpoint file",
+        extra={"event": "checkpoint.download", "job_id": job_id, "filename": filename}
+    )
+
+    return FileResponse(
+        path=checkpoint_path,
+        media_type="application/octet-stream",
+        filename=filename,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
     )
 
 
