@@ -508,28 +508,39 @@ class AIToolkitPlugin(TrainingPlugin):
     ) -> TrainingResult:
         """
         Run AI-Toolkit training subprocess and parse output.
-        """
-        # Find AI-Toolkit run script
-        # It could be installed as a package or as a local clone
-        # AI-Toolkit venv and run.py path (configured for pod isolation)
-        aitoolkit_venv_python = "/runpod-volume/isengard/.venvs/aitoolkit/bin/python"
-        aitoolkit_run_py = "/runpod-volume/isengard/ai-toolkit/run.py"
-        cmd = [aitoolkit_venv_python, aitoolkit_run_py, str(config_path)]
 
-        logger.info("Starting AI-Toolkit training", extra={
+        Uses the vendored AI-Toolkit from AITOOLKIT_PATH (default: /app/vendor/ai-toolkit).
+        Runs with system Python (deps are baked into the Docker image).
+        """
+        # AI-Toolkit is vendored - use system Python with vendored path
+        aitoolkit_path = self._config.aitoolkit_path
+        aitoolkit_run_py = aitoolkit_path / "run.py"
+
+        # Use system Python (deps installed in Docker image, no separate venv)
+        cmd = ["python", str(aitoolkit_run_py), str(config_path)]
+
+        logger.info("Starting AI-Toolkit training (vendored)", extra={
             "event": "training.subprocess_start",
             "command": " ".join(cmd),
+            "aitoolkit_path": str(aitoolkit_path),
         })
 
-        # Start subprocess
+        # Start subprocess with vendored AI-Toolkit in PYTHONPATH
+        env = {
+            **os.environ,
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONPATH": f"{aitoolkit_path}:{os.environ.get('PYTHONPATH', '')}",
+            "HF_HOME": str(self._config.cache_dir / "huggingface"),
+        }
+
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            cwd="/runpod-volume/isengard/ai-toolkit",
-            env={**os.environ, "PYTHONUNBUFFERED": "1", "HF_HOME": "/runpod-volume/isengard/cache/huggingface"},
+            cwd=str(aitoolkit_path),
+            env=env,
         )
 
         current_step = 0

@@ -128,11 +128,21 @@ phase_failed() {
 # ============================================================
 # STARTUP BANNER
 # ============================================================
-SCRIPT_VERSION="v2.3.1-no-ansi"
-BUILD_DATE="2025-12-30"
+SCRIPT_VERSION="v3.0.0-vendored"
+BUILD_DATE="2025-12-31"
 
 # Generate SHA256 of this script for verification
 SCRIPT_SHA=$(sha256sum /start.sh 2>/dev/null | cut -c1-12 || echo "unknown")
+
+# Read vendored versions from pins file
+VENDOR_PINS_FILE="/app/vendor/VENDOR_PINS.json"
+if [ -f "$VENDOR_PINS_FILE" ] && command -v jq &> /dev/null; then
+    COMFYUI_COMMIT=$(jq -r '.comfyui.commit' "$VENDOR_PINS_FILE" 2>/dev/null | cut -c1-8 || echo "unknown")
+    AITOOLKIT_COMMIT=$(jq -r '.["ai-toolkit"].commit' "$VENDOR_PINS_FILE" 2>/dev/null | cut -c1-8 || echo "unknown")
+else
+    COMFYUI_COMMIT="unknown"
+    AITOOLKIT_COMMIT="unknown"
+fi
 
 # Banner - simplified for container logs, fancy for TTY
 echo ""
@@ -157,11 +167,15 @@ echo "  Version: ${SCRIPT_VERSION}"
 echo "  Build:   ${BUILD_DATE}"
 echo "  SHA256:  ${SCRIPT_SHA}"
 echo ""
+echo "  Vendored Engines (pinned, deterministic builds):"
+echo "    - ComfyUI:    ${COMFYUI_COMMIT} (internal, 127.0.0.1:8188)"
+echo "    - AI-Toolkit: ${AITOOLKIT_COMMIT} (baked into image)"
+echo ""
 echo "  Features:"
 echo "    - SSH access on TCP port 22"
 echo "    - Fast parallel model downloads"
 echo "    - nginx reverse proxy (port 3000 -> API 8000)"
-echo "    - AI-Toolkit isolated venv"
+echo "    - Vendored engines (no runtime cloning)"
 echo "    - SSE streaming support"
 echo "    - Persistent volume storage"
 echo ""
@@ -485,15 +499,19 @@ else
 fi
 
 # ============================================================
-# 6. START COMFYUI
+# 6. START COMFYUI (Internal Service - NOT publicly exposed)
 # ============================================================
-header "Starting ComfyUI"
+header "Starting ComfyUI (Internal Service)"
 
 COMFYUI_DIR="/opt/ComfyUI"
+# ComfyUI binds to localhost only - it's an internal service
+COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
+COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 
 if [ -d "$COMFYUI_DIR" ]; then
     if ! pgrep -f "main.py.*ComfyUI" > /dev/null; then
-        log "Starting ComfyUI..."
+        log "Starting ComfyUI (binding to ${COMFYUI_HOST}:${COMFYUI_PORT})..."
+        log "  Note: ComfyUI is an INTERNAL service, not exposed externally"
 
         # Link models to ComfyUI directories
         mkdir -p "${COMFYUI_DIR}/models/checkpoints" "${COMFYUI_DIR}/models/loras" "${COMFYUI_DIR}/models/vae" "${COMFYUI_DIR}/models/clip" "${COMFYUI_DIR}/models/unet"
@@ -508,18 +526,19 @@ if [ -d "$COMFYUI_DIR" ]; then
         ln -sf "${VOLUME_ROOT}/loras"/*/*.safetensors "${COMFYUI_DIR}/models/loras/" 2>/dev/null || true
 
         cd "$COMFYUI_DIR"
-        nohup python main.py --listen 0.0.0.0 --port 8188 > "${LOG_DIR}/comfyui.log" 2>&1 &
+        # SECURITY: Bind to localhost only (127.0.0.1) - never 0.0.0.0
+        nohup python main.py --listen "${COMFYUI_HOST}" --port "${COMFYUI_PORT}" > "${LOG_DIR}/comfyui.log" 2>&1 &
 
         log "Waiting for ComfyUI..."
         for i in {1..30}; do
-            curl -s http://localhost:8188/system_stats > /dev/null 2>&1 && { log "ComfyUI started"; break; }
+            curl -s "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" > /dev/null 2>&1 && { log "ComfyUI started (internal: ${COMFYUI_HOST}:${COMFYUI_PORT})"; break; }
             sleep 2
         done
     else
         log "ComfyUI already running"
     fi
 else
-    warn "ComfyUI not installed"
+    warn "ComfyUI not installed at ${COMFYUI_DIR}"
 fi
 
 # ============================================================
@@ -652,11 +671,11 @@ header "Startup Complete"
 
 echo ""
 log "Services:"
-echo "  SSH:     $(pgrep -x sshd > /dev/null && echo '✓ port 22' || echo '✗')"
-echo "  Redis:   $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✓ port 6379' || echo '✗')"
-echo "  ComfyUI: $(curl -s http://localhost:8188/system_stats > /dev/null 2>&1 && echo '✓ port 8188' || echo '✗')"
-echo "  API:     $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✓ port 8000' || echo '✗')"
-echo "  Web:     $(curl -s http://localhost:3000 > /dev/null 2>&1 && echo '✓ port 3000' || echo '✗')"
+echo "  SSH:     $(pgrep -x sshd > /dev/null && echo '✓ port 22 (exposed)' || echo '✗')"
+echo "  Redis:   $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✓ port 6379 (internal)' || echo '✗')"
+echo "  ComfyUI: $(curl -s "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" > /dev/null 2>&1 && echo "✓ ${COMFYUI_HOST}:${COMFYUI_PORT} (internal only)" || echo '✗')"
+echo "  API:     $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✓ port 8000 (exposed)' || echo '✗')"
+echo "  Web:     $(curl -s http://localhost:3000 > /dev/null 2>&1 && echo '✓ port 3000 (exposed)' || echo '✗')"
 echo "  Worker:  $(pgrep -f 'apps.worker.src.main' > /dev/null && echo '✓' || echo '✗')"
 echo ""
 log "Models:"
@@ -668,52 +687,32 @@ echo "  T5-XXL:         $([ -f "${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors" ]
 echo ""
 
 # ============================================================
-# 11. AI-TOOLKIT SETUP (for training)
+# 11. VERIFY VENDORED AI-TOOLKIT (baked into image)
 # ============================================================
-header "Setting up AI-Toolkit"
+header "Verifying AI-Toolkit"
 
-AITOOLKIT_REPO="${VOLUME_ROOT}/ai-toolkit"
-AITOOLKIT_VENV="${VOLUME_ROOT}/.venvs/aitoolkit"
+# AI-Toolkit is vendored at /app/vendor/ai-toolkit (no runtime cloning)
+AITOOLKIT_PATH="${AITOOLKIT_PATH:-/app/vendor/ai-toolkit}"
 
-# Clone AI-Toolkit if not present
-if [ ! -d "${AITOOLKIT_REPO}/.git" ]; then
-    log "Cloning AI-Toolkit..."
-    git clone --depth 1 https://github.com/ostris/ai-toolkit.git "${AITOOLKIT_REPO}"
+if [ -d "${AITOOLKIT_PATH}" ]; then
+    log "AI-Toolkit verified at ${AITOOLKIT_PATH}"
+    # Check for key files
+    if [ -f "${AITOOLKIT_PATH}/run.py" ]; then
+        log_success "AI-Toolkit run.py found"
+    else
+        log_warn "AI-Toolkit run.py not found - training may fail"
+    fi
+
+    # Verify Python can import required modules
+    if python -c "import torch; print(f'PyTorch {torch.__version__}')" 2>/dev/null; then
+        PYTORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+        log_success "PyTorch ${PYTORCH_VER} available for training"
+    else
+        log_warn "PyTorch not available - training may fail"
+    fi
 else
-    log "AI-Toolkit repo exists"
-fi
-
-# Create venv if needed
-if [ ! -f "${AITOOLKIT_VENV}/bin/python" ]; then
-    log "Creating AI-Toolkit venv..."
-    mkdir -p "${VOLUME_ROOT}/.venvs"
-    python3 -m venv --system-site-packages "${AITOOLKIT_VENV}"
-    "${AITOOLKIT_VENV}/bin/pip" install --quiet --upgrade pip wheel
-
-    log "Installing AI-Toolkit requirements..."
-    "${AITOOLKIT_VENV}/bin/pip" install --quiet -r "${AITOOLKIT_REPO}/requirements.txt" 2>&1 | tail -5 || {
-        warn "Some requirements may have failed, attempting individual installs..."
-        "${AITOOLKIT_VENV}/bin/pip" install --quiet torch torchvision torchaudio
-        "${AITOOLKIT_VENV}/bin/pip" install --quiet transformers accelerate safetensors peft
-        "${AITOOLKIT_VENV}/bin/pip" install --quiet diffusers bitsandbytes scipy pyyaml
-    }
-
-    log "AI-Toolkit venv created"
-else
-    log "AI-Toolkit venv exists"
-fi
-
-# Add AI-Toolkit to venv's PYTHONPATH via .pth file
-SITE_PACKAGES=$("${AITOOLKIT_VENV}/bin/python" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "${AITOOLKIT_VENV}/lib/python3.11/site-packages")
-echo "${AITOOLKIT_REPO}" > "${SITE_PACKAGES}/aitoolkit.pth" 2>/dev/null || true
-
-# Verify installation
-if "${AITOOLKIT_VENV}/bin/python" -c "import torch; print(f'PyTorch {torch.__version__}')" 2>/dev/null; then
-    log "AI-Toolkit setup complete"
-    echo "  AI-Toolkit: ✓ ${AITOOLKIT_REPO}"
-    echo "  Venv:       ✓ ${AITOOLKIT_VENV}"
-else
-    warn "AI-Toolkit setup may be incomplete"
+    log_warn "AI-Toolkit not found at ${AITOOLKIT_PATH}"
+    log_warn "Training will not work. Rebuild image with vendored AI-Toolkit."
 fi
 
 echo ""
@@ -757,11 +756,20 @@ fi
 # ============================================================
 log_phase "Startup Complete"
 log_success "Isengard ${SCRIPT_VERSION} ready"
-log "Container will now stay running. Services available:"
-echo "  - API:     http://localhost:8000"
-echo "  - Web GUI: http://localhost:3000"
-echo "  - ComfyUI: http://localhost:8188"
-echo "  - SSH:     port 22"
+log "Container will now stay running."
+echo ""
+echo "  EXPOSED Services (accessible from host):"
+echo "    - Web GUI: http://localhost:3000"
+echo "    - API:     http://localhost:8000"
+echo "    - SSH:     port 22"
+echo ""
+echo "  INTERNAL Services (not accessible from host):"
+echo "    - ComfyUI: http://${COMFYUI_HOST}:${COMFYUI_PORT} (container-internal only)"
+echo "    - Redis:   localhost:6379 (container-internal only)"
+echo ""
+echo "  Vendored Engines:"
+echo "    - ComfyUI:    ${COMFYUI_COMMIT} @ /opt/ComfyUI"
+echo "    - AI-Toolkit: ${AITOOLKIT_COMMIT} @ ${AITOOLKIT_PATH}"
 
 # Keep container running
 tail -f /dev/null

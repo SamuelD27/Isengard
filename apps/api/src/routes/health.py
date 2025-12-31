@@ -50,17 +50,54 @@ async def readiness_check():
     """
     Readiness check with dependency status.
 
-    Returns the status of required dependencies.
+    Returns the status of required dependencies including internal services.
+    ComfyUI is an internal service (127.0.0.1:8188) - not exposed externally.
     """
+    import httpx
+
     config = get_global_config()
 
-    # TODO: Add actual dependency checks (Redis, etc.)
+    # Check ComfyUI internal service
+    comfyui_status = "unknown"
+    comfyui_details = None
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{config.comfyui_url}/system_stats")
+            if response.status_code == 200:
+                comfyui_status = "healthy"
+                stats = response.json()
+                comfyui_details = {
+                    "url": config.comfyui_url,
+                    "binding": f"{config.comfyui_host}:{config.comfyui_port}",
+                    "exposed": False,  # Internal service only
+                }
+            else:
+                comfyui_status = "unhealthy"
+    except Exception as e:
+        comfyui_status = "unreachable"
+        comfyui_details = {"error": str(e)}
+
+    # Determine overall status
+    # API is ready even if ComfyUI is down (fast-test mode works without it)
+    overall_status = "ready"
+    if config.is_production and comfyui_status != "healthy":
+        overall_status = "degraded"
+
     return {
-        "status": "ready",
+        "status": overall_status,
         "mode": config.mode,
         "dependencies": {
-            "redis": "unchecked",  # TODO: Implement
             "storage": "ok" if config.data_dir.exists() else "missing",
+            "comfyui": {
+                "status": comfyui_status,
+                "internal_service": True,
+                "details": comfyui_details,
+            },
+            "aitoolkit": {
+                "status": "ok" if config.aitoolkit_path.exists() else "missing",
+                "path": str(config.aitoolkit_path),
+                "vendored": True,
+            },
         }
     }
 

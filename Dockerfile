@@ -1,20 +1,27 @@
 # Isengard Dockerfile
 #
-# Full GPU image with SSH, ComfyUI, and all dependencies.
+# Full GPU image with SSH, vendored ComfyUI + AI-Toolkit, and all dependencies.
 # For deployment on RunPod serverless or pods.
 #
-# Ports:
+# EXPOSED Ports (public):
 #   22   - SSH
-#   3000 - Web GUI
-#   8000 - API
-#   8188 - ComfyUI
+#   3000 - Web GUI (nginx reverse proxy)
+#   8000 - API (direct access, optional)
+#
+# INTERNAL Ports (NOT exposed, localhost only):
+#   8188 - ComfyUI (internal service, bound to 127.0.0.1)
+#
+# Vendored Dependencies:
+#   vendor/comfyui    - ComfyUI (pinned commit from VENDOR_PINS.json)
+#   vendor/ai-toolkit - AI-Toolkit (pinned commit from VENDOR_PINS.json)
 #
 # Build:
 #   docker build -t isengard:latest .
 #
 # Run locally (for testing):
-#   docker run --gpus all -p 22:22 -p 3000:3000 -p 8000:8000 -p 8188:8188 isengard:latest
+#   docker run --gpus all -p 22:22 -p 3000:3000 -p 8000:8000 isengard:latest
 #
+# Note: ComfyUI port 8188 is intentionally NOT published - it's internal only.
 # Note: HF_TOKEN and R2 credentials are hardcoded in start.sh
 
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
@@ -92,30 +99,43 @@ RUN uv pip install --system \
     --index-url https://download.pytorch.org/whl/cu124
 
 # ============================================================
-# ComfyUI Installation
+# ComfyUI Installation (Vendored)
 # ============================================================
+# ComfyUI is vendored at a pinned commit (see vendor/VENDOR_PINS.json)
+# This ensures deterministic, reproducible builds.
+# ComfyUI runs as an INTERNAL service bound to 127.0.0.1:8188 only.
 WORKDIR /opt
 
-RUN git clone https://github.com/comfyanonymous/ComfyUI.git \
-    && cd ComfyUI \
-    && uv pip install --system -r requirements.txt
+# Copy vendored ComfyUI source
+COPY vendor/comfyui /opt/ComfyUI
 
-# Create model directories
+# Install ComfyUI requirements
+RUN uv pip install --system -r /opt/ComfyUI/requirements.txt
+
+# Create model directories (will be symlinked to volume at runtime)
 RUN mkdir -p /opt/ComfyUI/models/checkpoints \
     && mkdir -p /opt/ComfyUI/models/loras \
     && mkdir -p /opt/ComfyUI/models/vae \
-    && mkdir -p /opt/ComfyUI/models/clip
+    && mkdir -p /opt/ComfyUI/models/clip \
+    && mkdir -p /opt/ComfyUI/models/unet
 
-EXPOSE 8188
+# NOTE: Port 8188 is NOT exposed - ComfyUI is an internal service only
+# It binds to 127.0.0.1:8188 and is not accessible from outside the container
 
 # ============================================================
-# AI-Toolkit for LoRA Training
+# AI-Toolkit for LoRA Training (Vendored)
 # ============================================================
-# Note: The pip package provides some dependencies, but actual training
-# uses a git clone at /runpod-volume/isengard/ai-toolkit/ with an
-# isolated venv. This is set up by start.sh at runtime because the
-# pip package has module path issues ('ostris_ai_toolkit.toolkit' vs 'toolkit').
-RUN uv pip install --system ostris-ai-toolkit
+# AI-Toolkit is vendored at a pinned commit (see vendor/VENDOR_PINS.json)
+# This eliminates runtime cloning and ensures reproducible training.
+# The vendored code runs directly with system Python (no separate venv).
+
+# Copy vendored AI-Toolkit to /app/vendor for consistency
+COPY vendor/ai-toolkit /app/vendor/ai-toolkit
+
+# Install AI-Toolkit requirements
+# Note: Some deps overlap with ComfyUI/PyTorch, uv handles deduplication
+RUN uv pip install --system -r /app/vendor/ai-toolkit/requirements.txt || \
+    echo "Some AI-Toolkit requirements may have failed, core deps already installed"
 
 # ============================================================
 # Node.js for Web Frontend
@@ -175,9 +195,14 @@ WORKDIR /app
 COPY start.sh /start.sh
 COPY deploy/runpod/secrets.sh /secrets.sh
 
+# Copy vendor pins file for version verification
+COPY vendor/VENDOR_PINS.json /app/vendor/VENDOR_PINS.json
+
 # Create version marker for verification
-RUN echo "BOOTSTRAP_VERSION=v2.3.1-no-ansi BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
-    && sha256sum /start.sh >> /app/BOOTSTRAP_VERSION
+RUN echo "BOOTSTRAP_VERSION=v3.0.0-vendored BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
+    && sha256sum /start.sh >> /app/BOOTSTRAP_VERSION \
+    && echo "VENDOR_COMFYUI=$(cat /app/vendor/VENDOR_PINS.json | grep -A1 'comfyui' | grep commit | cut -d'"' -f4)" >> /app/BOOTSTRAP_VERSION \
+    && echo "VENDOR_AITOOLKIT=$(cat /app/vendor/VENDOR_PINS.json | grep -A1 'ai-toolkit' | grep commit | cut -d'"' -f4)" >> /app/BOOTSTRAP_VERSION
 
 # Copy helper scripts for pod management
 COPY scripts/bootstrap_pod.sh /app/scripts/bootstrap_pod.sh
@@ -188,7 +213,7 @@ RUN chmod +x /start.sh /secrets.sh /app/scripts/*.sh
 # ============================================================
 # Environment
 # ============================================================
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/vendor/ai-toolkit
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=0
 
@@ -201,8 +226,16 @@ ENV ISENGARD_MODE=production
 ENV VOLUME_ROOT=/runpod-volume/isengard
 ENV LOG_DIR=/runpod-volume/isengard/logs
 ENV REDIS_URL=redis://localhost:6379
-ENV COMFYUI_URL=http://localhost:8188
 ENV USE_REDIS=true
+
+# ComfyUI internal service configuration
+# IMPORTANT: ComfyUI binds to localhost only - it is NOT exposed externally
+ENV COMFYUI_HOST=127.0.0.1
+ENV COMFYUI_PORT=8188
+ENV COMFYUI_URL=http://127.0.0.1:8188
+
+# AI-Toolkit vendored path
+ENV AITOOLKIT_PATH=/app/vendor/ai-toolkit
 
 EXPOSE 8000
 

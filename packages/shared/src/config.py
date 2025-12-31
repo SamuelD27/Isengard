@@ -71,8 +71,14 @@ class Config:
     # Worker settings
     worker_concurrency: int = 1
 
-    # ComfyUI settings
-    comfyui_url: str = "http://localhost:8188"
+    # ComfyUI settings (internal service - NOT publicly exposed)
+    # ComfyUI binds to localhost only for security
+    comfyui_host: str = "127.0.0.1"
+    comfyui_port: int = 8188
+    comfyui_url: str = "http://127.0.0.1:8188"
+
+    # AI-Toolkit settings (vendored path)
+    aitoolkit_path: Path = field(default_factory=lambda: Path("/app/vendor/ai-toolkit"))
 
     # Logging
     log_level: str = "INFO"
@@ -172,7 +178,10 @@ def get_config() -> Config:
         API_PORT: API bind port
         REDIS_URL: Redis connection URL
         WORKER_CONCURRENCY: Max parallel jobs
-        COMFYUI_URL: ComfyUI server URL
+        COMFYUI_HOST: ComfyUI bind host (default: 127.0.0.1 - internal only)
+        COMFYUI_PORT: ComfyUI port (default: 8188)
+        COMFYUI_URL: ComfyUI server URL (default: http://127.0.0.1:8188)
+        AITOOLKIT_PATH: Path to vendored AI-Toolkit (default: /app/vendor/ai-toolkit)
         LOG_LEVEL: Minimum log level
         LOG_TO_FILE: 'true' or 'false'
         LOG_TO_STDOUT: 'true' or 'false'
@@ -187,6 +196,14 @@ def get_config() -> Config:
     log_dir = Path(os.getenv("LOG_DIR", "./logs"))
     tmp_dir = Path(os.getenv("TMP_DIR", "./tmp"))
 
+    # ComfyUI internal service settings
+    comfyui_host = os.getenv("COMFYUI_HOST", "127.0.0.1")
+    comfyui_port = int(os.getenv("COMFYUI_PORT", "8188"))
+    comfyui_url = os.getenv("COMFYUI_URL", f"http://{comfyui_host}:{comfyui_port}")
+
+    # AI-Toolkit vendored path
+    aitoolkit_path = Path(os.getenv("AITOOLKIT_PATH", "/app/vendor/ai-toolkit"))
+
     config = Config(
         mode=mode,
         debug=os.getenv("DEBUG", "false").lower() == "true",
@@ -197,7 +214,10 @@ def get_config() -> Config:
         api_port=int(os.getenv("API_PORT", "8000")),
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379"),
         worker_concurrency=int(os.getenv("WORKER_CONCURRENCY", "1")),
-        comfyui_url=os.getenv("COMFYUI_URL", "http://localhost:8188"),
+        comfyui_host=comfyui_host,
+        comfyui_port=comfyui_port,
+        comfyui_url=comfyui_url,
+        aitoolkit_path=aitoolkit_path,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_to_file=os.getenv("LOG_TO_FILE", "true").lower() == "true",
         log_to_stdout=os.getenv("LOG_TO_STDOUT", "true").lower() == "true",
