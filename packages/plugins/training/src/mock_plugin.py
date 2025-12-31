@@ -263,6 +263,48 @@ class MockTrainingPlugin(TrainingPlugin):
                     "reason": "Planned for Phase 2",
                     "description": "LoRA alpha scaling factor",
                 },
+                # Sample image configuration - WIRED
+                "sample_every_n_steps": {
+                    "type": "int",
+                    "min": 50,
+                    "max": 1000,
+                    "step": 10,
+                    "default": 100,
+                    "wired": True,
+                    "description": "Generate sample images every N steps",
+                },
+                "sample_count": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 5,
+                    "default": 3,
+                    "wired": True,
+                    "description": "Number of sample images per step",
+                },
+                "sample_prompts": {
+                    "type": "string_list",
+                    "default": None,
+                    "wired": True,
+                    "description": "Custom prompts for samples (uses defaults if empty)",
+                },
+                # Checkpoint configuration - WIRED
+                "checkpoint_every_n_steps": {
+                    "type": "int",
+                    "min": 100,
+                    "max": 2000,
+                    "step": 50,
+                    "default": 250,
+                    "wired": True,
+                    "description": "Save checkpoint every N steps",
+                },
+                "max_checkpoints": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 4,
+                    "default": 2,
+                    "wired": True,
+                    "description": "Max intermediate checkpoints to keep",
+                },
             },
         }
 
@@ -280,7 +322,6 @@ class MockTrainingPlugin(TrainingPlugin):
         trigger_word: str,
         progress_callback: Callable[[TrainingProgress], None] | None = None,
         job_id: str | None = None,
-        sample_interval: int | None = None,
     ) -> TrainingResult:
         """
         Simulate training with progress updates.
@@ -295,16 +336,17 @@ class MockTrainingPlugin(TrainingPlugin):
             trigger_word: Trigger word for the LoRA
             progress_callback: Callback for progress updates
             job_id: Optional job ID for sample image organization
-            sample_interval: Generate sample every N steps (default: 10% intervals)
         """
         self._cancelled = False
         self._running = True
 
         total_steps = config.steps
 
-        # Calculate sample interval (default: generate at 10%, 20%, ... 90%, 100%)
-        if sample_interval is None:
-            sample_interval = max(1, total_steps // 10)
+        # Use sample_every_n_steps from config, with fallback to 10% intervals
+        sample_interval = getattr(config, 'sample_every_n_steps', None) or max(1, total_steps // 10)
+        sample_count = getattr(config, 'sample_count', 3)
+        checkpoint_interval = getattr(config, 'checkpoint_every_n_steps', None) or max(1, total_steps // 4)
+        max_checkpoints = getattr(config, 'max_checkpoints', 2)
 
         # Ensure at least 2 samples for Fast-Test mode (early and late)
         if total_steps < 20:
@@ -317,6 +359,9 @@ class MockTrainingPlugin(TrainingPlugin):
             "trigger_word": trigger_word,
             "steps": config.steps,
             "sample_interval": sample_interval,
+            "sample_count": sample_count,
+            "checkpoint_interval": checkpoint_interval,
+            "max_checkpoints": max_checkpoints,
             "job_id": job_id,
         })
 

@@ -26,9 +26,7 @@ import {
   Copy,
   Check,
   AlertTriangle,
-  RefreshCw,
   Square,
-  Terminal,
   Clock,
   Gauge,
   Bug,
@@ -39,26 +37,17 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
-  Search,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { LossChart } from '@/components/training/LossChart'
 import { CheckpointsPanel } from '@/components/training/CheckpointsPanel'
 import { SampleImagesPanel } from '@/components/training/SampleImagesPanel'
+import { TrainingLogsPanel, LogEntry, ProgressBar } from '@/components/training/TrainingLogsPanel'
 import { api, Character, GPUMetrics } from '@/lib/api'
-
-interface LogEntry {
-  timestamp: string
-  level: string
-  message: string
-  event?: string
-  fields?: Record<string, unknown>
-}
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
@@ -86,21 +75,19 @@ export default function TrainingDetailPage() {
   const [sseConnected, setSseConnected] = useState(false)
   const [sseError, setSseError] = useState<string | null>(null)
   const [sseRetryCountdown, setSseRetryCountdown] = useState<number | null>(null)
-  const [logFilter, setLogFilter] = useState<'all' | 'info' | 'error'>('all')
-  const [logSearch, setLogSearch] = useState('')
+  // logFilter and logSearch are now handled by TrainingLogsPanel
   const [copiedId, setCopiedId] = useState(false)
   const [gpuMetrics, setGpuMetrics] = useState<GPUMetrics | null>(null)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [lossHistory, setLossHistory] = useState<{ step: number; loss: number }[]>([])
-  const [autoScroll, setAutoScroll] = useState(true)
   const [lastLogTime, setLastLogTime] = useState<Date | null>(null)
+  const [progressBars, setProgressBars] = useState<Map<string, ProgressBar>>(new Map())
 
   // Log-derived progress state
   const [logDerivedStep, setLogDerivedStep] = useState<number>(0)
   const [logDerivedTotal, setLogDerivedTotal] = useState<number>(0)
   const [usingLogProgress, setUsingLogProgress] = useState(false)
 
-  const logsEndRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const retryDelayRef = useRef<number>(SSE_INITIAL_RETRY_DELAY)
@@ -252,25 +239,48 @@ export default function TrainingDetailPage() {
           parseProgressFromMessage(data.message)
         }
 
-        // Add log entry for every step with progress info
-        if (data.message && currentStep > 0) {
+        // Handle progress bar updates
+        if (data.progress_bar) {
+          const pb = data.progress_bar
+          setProgressBars(prev => {
+            const newMap = new Map(prev)
+            newMap.set(pb.id, {
+              id: pb.id,
+              type: pb.type || 'stage',
+              label: pb.label || pb.id,
+              value: pb.value || 0,
+              current: pb.current,
+              total: pb.total,
+              timestamp: data.timestamp || new Date().toISOString(),
+              completed: pb.value >= 100,
+            })
+            return newMap
+          })
+        }
+
+        // Add log entry for stage changes or significant events (not every training step)
+        const isStageChange = data.stage && data.stage !== 'training'
+        const isSignificantStep = currentStep > 0 && currentStep % 10 === 0 // Log every 10 steps
+
+        if (data.message && (isStageChange || isSignificantStep)) {
           setLogs(prev => {
             // Avoid duplicate entries for same step
             const lastLog = prev[prev.length - 1]
-            if (lastLog?.fields?.step === currentStep) {
+            if (lastLog?.fields?.step === currentStep && !isStageChange) {
               return prev
             }
             const newLogs = [...prev.slice(-500), {
               timestamp: data.timestamp || new Date().toISOString(),
               level: 'INFO',
               message: data.message,
-              event: 'training.progress',
+              event: data.stage ? `stage.${data.stage}` : 'training.progress',
               fields: {
                 step: currentStep,
                 loss: currentLoss,
                 lr: data.lr,
                 iteration_speed: data.iteration_speed,
                 eta_seconds: data.eta_seconds,
+                stage: data.stage,
               },
             }]
             setLastLogTime(new Date())
@@ -348,13 +358,6 @@ export default function TrainingDetailPage() {
     }
   }, [connectSSE])
 
-  // Auto-scroll logs when enabled
-  useEffect(() => {
-    if (autoScroll) {
-      logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [logs, autoScroll])
-
   // Copy job ID
   const copyJobId = useCallback(() => {
     if (jobId) {
@@ -363,24 +366,6 @@ export default function TrainingDetailPage() {
       setTimeout(() => setCopiedId(false), 2000)
     }
   }, [jobId])
-
-  // Filter and search logs
-  const filteredLogs = useMemo(() => {
-    return logs.filter(log => {
-      // Level filter
-      if (logFilter === 'error' && log.level !== 'ERROR' && log.level !== 'WARNING') {
-        return false
-      }
-      if (logFilter === 'info' && log.level !== 'INFO') {
-        return false
-      }
-      // Text search
-      if (logSearch && !log.message.toLowerCase().includes(logSearch.toLowerCase())) {
-        return false
-      }
-      return true
-    })
-  }, [logs, logFilter, logSearch])
 
   // Calculate effective progress - prefer log-derived, fallback to API
   const effectiveProgress = useMemo(() => {
@@ -420,20 +405,6 @@ export default function TrainingDetailPage() {
         return <X className="h-5 w-5 text-muted-foreground" />
       default:
         return <Loader2 className="h-5 w-5 text-accent animate-spin" />
-    }
-  }
-
-  // Log level colors
-  const getLogLevelClass = (level: string) => {
-    switch (level) {
-      case 'ERROR':
-        return 'text-red-400 bg-red-500/10'
-      case 'WARNING':
-        return 'text-yellow-400 bg-yellow-500/10'
-      case 'DEBUG':
-        return 'text-gray-500'
-      default:
-        return 'text-muted-foreground'
     }
   }
 
@@ -709,95 +680,14 @@ export default function TrainingDetailPage() {
             totalSteps={effectiveProgress.total}
           />
 
-          {/* Logs */}
-          <Card className="flex-1">
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Terminal className="h-4 w-4" />
-                  Logs ({filteredLogs.length})
-                  {lastLogTime && (
-                    <span className="text-xs font-normal text-muted-foreground">
-                      (last: {lastLogTime.toLocaleTimeString()})
-                    </span>
-                  )}
-                </CardTitle>
-                <div className="flex items-center gap-3">
-                  {/* Search input */}
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-                    <input
-                      type="text"
-                      placeholder="Search logs..."
-                      value={logSearch}
-                      onChange={(e) => setLogSearch(e.target.value)}
-                      className="text-xs bg-input border border-border rounded pl-7 pr-2 py-1 w-32 focus:w-48 transition-all focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                  </div>
-                  <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={autoScroll}
-                      onChange={(e) => setAutoScroll(e.target.checked)}
-                      className="w-3 h-3 rounded"
-                    />
-                    Auto-scroll
-                  </label>
-                  <select
-                    className="text-xs bg-input border border-border rounded px-2 py-1"
-                    value={logFilter}
-                    onChange={(e) => setLogFilter(e.target.value as 'all' | 'info' | 'error')}
-                  >
-                    <option value="all">All</option>
-                    <option value="info">Info</option>
-                    <option value="error">Errors</option>
-                  </select>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => refetchLogs()}
-                    title="Refresh logs"
-                  >
-                    <RefreshCw className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-96 rounded border border-border bg-background p-3">
-                <div className="font-mono text-xs space-y-1">
-                  {filteredLogs.length === 0 ? (
-                    <p className="text-muted-foreground">
-                      {logs.length === 0 ? 'No logs yet...' : 'No logs match your filter.'}
-                    </p>
-                  ) : (
-                    filteredLogs.map((log, i) => (
-                      <div
-                        key={i}
-                        className={`py-0.5 px-1 rounded ${getLogLevelClass(log.level)}`}
-                      >
-                        <span className="text-muted-foreground/50">
-                          {new Date(log.timestamp).toLocaleTimeString()}
-                        </span>
-                        {' '}
-                        <span className={`font-semibold ${
-                          log.level === 'ERROR' ? 'text-red-400' :
-                          log.level === 'WARNING' ? 'text-yellow-400' :
-                          log.level === 'DEBUG' ? 'text-gray-500' :
-                          'text-blue-400'
-                        }`}>
-                          [{log.level}]
-                        </span>
-                        {' '}
-                        {log.message}
-                      </div>
-                    ))
-                  )}
-                  <div ref={logsEndRef} />
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
+          {/* Training Logs with Progress Bars */}
+          <TrainingLogsPanel
+            logs={logs}
+            progressBars={progressBars}
+            lastLogTime={lastLogTime}
+            isActive={!!isActive}
+            onRefresh={refetchLogs}
+          />
         </div>
       </div>
 

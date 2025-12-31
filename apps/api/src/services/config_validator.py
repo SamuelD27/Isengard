@@ -170,3 +170,19 @@ def _validate_param_value(
                 status_code=400,
                 detail=f"Parameter '{key}' must be a boolean, got {type(value).__name__}",
             )
+
+    # Validate string_list (list of strings)
+    elif param_type == "string_list":
+        if value is None:
+            return  # None is allowed (uses default)
+        if not isinstance(value, list):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Parameter '{key}' must be a list of strings, got {type(value).__name__}",
+            )
+        for i, item in enumerate(value):
+            if not isinstance(item, str):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Parameter '{key}' item {i} must be a string, got {type(item).__name__}",
+                )

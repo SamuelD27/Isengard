@@ -118,6 +118,7 @@ export function DynamicControl({
             checked={boolValue}
             onChange={(e) => handleChange(e.target.checked)}
             disabled={disabled}
+            aria-label={label}
             className={`h-4 w-4 rounded border-border ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
           />
           <Label htmlFor={name} className={disabled ? 'opacity-50' : ''}>

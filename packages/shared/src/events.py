@@ -24,14 +24,26 @@ class TrainingStage(str, Enum):
     """Training pipeline stages."""
     QUEUED = "queued"
     INITIALIZING = "initializing"
+    LOADING_MODEL = "loading_model"
     PREPARING_DATASET = "preparing_dataset"
     CAPTIONING = "captioning"
     TRAINING = "training"
     SAMPLING = "sampling"
+    SAVING_CHECKPOINT = "saving_checkpoint"
     EXPORTING = "exporting"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ProgressBarType(str, Enum):
+    """Types of progress bars for UI display."""
+    STAGE = "stage"  # Stage completion (e.g., "Loading model...")
+    TRAINING = "training"  # Main training progress
+    DOWNLOAD = "download"  # Model/file downloads
+    UPLOAD = "upload"  # File uploads
+    SAMPLE = "sample"  # Sample generation
+    CHECKPOINT = "checkpoint"  # Checkpoint saving
 
 
 class EventType(str, Enum):
@@ -98,9 +110,18 @@ class TrainingProgressEvent:
     loss: float | None = None
     lr: float | None = None
     eta_seconds: int | None = None
+    iteration_speed: float | None = None
     gpu: GPUMetrics | None = None
     message: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    # Progress bar support for UI
+    progress_bar_id: str | None = None  # Unique ID for updating in place
+    progress_bar_type: ProgressBarType | None = None  # Type of progress bar
+    progress_bar_label: str | None = None  # Label for the progress bar
+    progress_bar_value: float | None = None  # 0-100 progress value
+    progress_bar_total: int | None = None  # Total count for display (e.g., bytes, steps)
+    progress_bar_current: int | None = None  # Current count
 
     # Optional fields for specific events
     sample_path: str | None = None
@@ -130,6 +151,8 @@ class TrainingProgressEvent:
             result["lr"] = self.lr
         if self.eta_seconds is not None:
             result["eta_seconds"] = self.eta_seconds
+        if self.iteration_speed is not None:
+            result["iteration_speed"] = round(self.iteration_speed, 2)
         if self.gpu is not None:
             result["gpu"] = self.gpu.to_dict()
         if self.sample_path:
@@ -142,6 +165,17 @@ class TrainingProgressEvent:
             result["error_type"] = self.error_type
         if self.error_stack:
             result["error_stack"] = self.error_stack
+
+        # Progress bar fields
+        if self.progress_bar_id:
+            result["progress_bar"] = {
+                "id": self.progress_bar_id,
+                "type": self.progress_bar_type.value if self.progress_bar_type else None,
+                "label": self.progress_bar_label,
+                "value": self.progress_bar_value,
+                "total": self.progress_bar_total,
+                "current": self.progress_bar_current,
+            }
 
         return result
 

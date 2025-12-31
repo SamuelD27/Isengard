@@ -22,6 +22,8 @@ import {
   Settings2,
   Clock,
   AlertTriangle,
+  Image,
+  Save,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card'
@@ -86,6 +88,11 @@ interface ExtendedTrainingConfig extends TrainingConfig {
   optimizer?: string
   scheduler?: string
   precision?: string
+  sample_every_n_steps?: number
+  sample_count?: number
+  sample_prompts?: string[]
+  checkpoint_every_n_steps?: number
+  max_checkpoints?: number
 }
 
 const defaultConfig: ExtendedTrainingConfig = {
@@ -98,6 +105,11 @@ const defaultConfig: ExtendedTrainingConfig = {
   optimizer: 'adamw8bit',
   scheduler: 'cosine',
   precision: 'bf16',
+  sample_every_n_steps: 100,
+  sample_count: 3,
+  sample_prompts: [],
+  checkpoint_every_n_steps: 250,
+  max_checkpoints: 2,
 }
 
 export default function StartTrainingPage() {
@@ -106,9 +118,11 @@ export default function StartTrainingPage() {
   const [selectedCharacter, setSelectedCharacter] = useState<string>('')
   const [selectedPreset, setSelectedPreset] = useState<PresetKey | 'custom'>('balanced')
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [showSamplingCheckpoints, setShowSamplingCheckpoints] = useState(false)
   const [showUnavailable, setShowUnavailable] = useState(false)
   const [config, setConfig] = useState<ExtendedTrainingConfig>(defaultConfig)
   const [configInitialized, setConfigInitialized] = useState(false)
+  const [samplePromptsText, setSamplePromptsText] = useState('')  // Comma-separated prompts
 
   // Fetch capabilities from /api/info
   const { data: apiInfo } = useQuery({
@@ -371,6 +385,120 @@ export default function StartTrainingPage() {
               </select>
             </div>
           </div>
+
+          {/* Sampling & Checkpoints Toggle */}
+          <button
+            onClick={() => setShowSamplingCheckpoints(!showSamplingCheckpoints)}
+            className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Image className="h-4 w-4" />
+            {showSamplingCheckpoints ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            Sampling & Checkpoints
+          </button>
+
+          {/* Sampling & Checkpoints Settings */}
+          {showSamplingCheckpoints && (
+            <div className="space-y-4 pt-4 border-t border-border">
+              {/* Sample Images Section */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <Image className="h-4 w-4 text-accent" />
+                  Sample Images
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="sample_every">Generate Every N Steps</Label>
+                    <Input
+                      id="sample_every"
+                      type="number"
+                      min={50}
+                      max={1000}
+                      step={10}
+                      value={config.sample_every_n_steps}
+                      onChange={(e) => handleConfigChange({ sample_every_n_steps: parseInt(e.target.value) || 100 })}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Samples at: {config.sample_every_n_steps}, {(config.sample_every_n_steps || 100) * 2}, {(config.sample_every_n_steps || 100) * 3}... steps
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="sample_count">Images Per Sample</Label>
+                    <select
+                      id="sample_count"
+                      className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
+                      value={config.sample_count}
+                      onChange={(e) => handleConfigChange({ sample_count: parseInt(e.target.value) })}
+                    >
+                      <option value={1}>1 image</option>
+                      <option value={2}>2 images</option>
+                      <option value={3}>3 images (default)</option>
+                      <option value={4}>4 images</option>
+                      <option value={5}>5 images</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sample_prompts">Sample Prompts (optional)</Label>
+                  <textarea
+                    id="sample_prompts"
+                    className="flex min-h-[80px] w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-accent resize-none"
+                    placeholder="Enter custom prompts, one per line. Use {trigger_word} as placeholder.&#10;Example:&#10;a photo of {trigger_word}&#10;portrait of {trigger_word}, studio lighting"
+                    value={samplePromptsText}
+                    onChange={(e) => {
+                      setSamplePromptsText(e.target.value)
+                      const prompts = e.target.value.split('\n').map(p => p.trim()).filter(p => p.length > 0)
+                      handleConfigChange({ sample_prompts: prompts.length > 0 ? prompts : undefined })
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Leave empty to use default prompts. Max {config.sample_count} prompts will be used.
+                  </p>
+                </div>
+              </div>
+
+              {/* Checkpoints Section */}
+              <div className="space-y-3 pt-4 border-t border-border/50">
+                <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <Save className="h-4 w-4 text-accent" />
+                  Checkpoints
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="checkpoint_every">Save Every N Steps</Label>
+                    <Input
+                      id="checkpoint_every"
+                      type="number"
+                      min={100}
+                      max={2000}
+                      step={50}
+                      value={config.checkpoint_every_n_steps}
+                      onChange={(e) => handleConfigChange({ checkpoint_every_n_steps: parseInt(e.target.value) || 250 })}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Checkpoints at: {config.checkpoint_every_n_steps}, {(config.checkpoint_every_n_steps || 250) * 2}, {(config.checkpoint_every_n_steps || 250) * 3}... steps
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="max_checkpoints">Max Checkpoints to Keep</Label>
+                    <select
+                      id="max_checkpoints"
+                      className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
+                      value={config.max_checkpoints}
+                      onChange={(e) => handleConfigChange({ max_checkpoints: parseInt(e.target.value) })}
+                    >
+                      <option value={1}>1 checkpoint</option>
+                      <option value={2}>2 checkpoints (default)</option>
+                      <option value={3}>3 checkpoints</option>
+                      <option value={4}>4 checkpoints</option>
+                    </select>
+                    <p className="text-xs text-muted-foreground">
+                      Final LoRA model is always saved regardless of this setting.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Advanced Toggle */}
           <button

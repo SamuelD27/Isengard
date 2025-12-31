@@ -1,0 +1,18 @@
+{
+  "comfyui": {
+    "repo": "https://github.com/comfyanonymous/ComfyUI.git",
+    "branch": "master",
+    "commit": "6ca3d5c011bc15737131eb665939ae0a39a74254",
+    "pinned_at": "2025-12-31",
+    "purpose": "Image generation backend (FLUX workflows)",
+    "notes": "Internal service bound to 127.0.0.1:8188, never publicly exposed"
+  },
+  "ai-toolkit": {
+    "repo": "https://github.com/ostris/ai-toolkit.git",
+    "branch": "main",
+    "commit": "4d5a649a7dc1e3056e97f66b62e5d32c23d3c8a1",
+    "pinned_at": "2025-12-31",
+    "purpose": "LoRA training backend (FLUX.1-dev identity training)",
+    "notes": "Runs as subprocess from vendored path, no separate venv needed"
+  }
+}

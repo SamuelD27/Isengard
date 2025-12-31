@@ -203,6 +203,13 @@ export interface TrainingConfig {
   optimizer?: string
   scheduler?: string
   precision?: string
+  // Sample image configuration
+  sample_every_n_steps?: number
+  sample_count?: number
+  sample_prompts?: string[]
+  // Checkpoint configuration
+  checkpoint_every_n_steps?: number
+  max_checkpoints?: number
 }
 
 export interface TrainingJob {
@@ -300,7 +307,7 @@ export interface ToggleSchema {
 }
 
 export interface ParameterSchema {
-  type: 'int' | 'float' | 'enum' | 'bool' | 'string'
+  type: 'int' | 'float' | 'enum' | 'bool' | 'string' | 'string_list'
   min?: number
   max?: number
   step?: number

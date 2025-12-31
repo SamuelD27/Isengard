@@ -163,14 +163,47 @@ class AIToolkitPlugin(TrainingPlugin):
                     "reason": "Planned for Phase 2",
                     "description": "How captions are generated for training",
                 },
-                "checkpoint_every": {
+                # Sample image configuration - WIRED
+                "sample_every_n_steps": {
+                    "type": "int",
+                    "min": 50,
+                    "max": 1000,
+                    "step": 10,
+                    "default": 100,
+                    "wired": True,
+                    "description": "Generate sample images every N steps",
+                },
+                "sample_count": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 5,
+                    "default": 3,
+                    "wired": True,
+                    "description": "Number of sample images per step",
+                },
+                "sample_prompts": {
+                    "type": "string_list",
+                    "default": None,
+                    "wired": True,
+                    "description": "Custom prompts for samples (comma-separated, uses defaults if empty)",
+                },
+                # Checkpoint configuration - WIRED
+                "checkpoint_every_n_steps": {
                     "type": "int",
                     "min": 100,
-                    "max": 5000,
-                    "default": 500,
-                    "wired": False,
-                    "reason": "Planned for Phase 2",
+                    "max": 2000,
+                    "step": 50,
+                    "default": 250,
+                    "wired": True,
                     "description": "Save checkpoint every N steps",
+                },
+                "max_checkpoints": {
+                    "type": "int",
+                    "min": 1,
+                    "max": 4,
+                    "default": 2,
+                    "wired": True,
+                    "description": "Max intermediate checkpoints to keep (final always saved)",
                 },
             },
         }
@@ -232,8 +265,8 @@ class AIToolkitPlugin(TrainingPlugin):
                         },
                         "save": {
                             "dtype": "float16",
-                            "save_every": max(config.steps // 4, 100),
-                            "max_step_saves_to_keep": 2,
+                            "save_every": config.checkpoint_every_n_steps,
+                            "max_step_saves_to_keep": config.max_checkpoints,
                         },
                         "datasets": [
                             {
@@ -268,14 +301,10 @@ class AIToolkitPlugin(TrainingPlugin):
                         },
                         "sample": {
                             "sampler": "flowmatch",
-                            "sample_every": max(config.steps // 10, 50),
+                            "sample_every": config.sample_every_n_steps,
                             "width": config.resolution,
                             "height": config.resolution,
-                            "prompts": [
-                                f"a photo of {trigger_word}",
-                                f"a portrait of {trigger_word}, professional photography",
-                                f"{trigger_word} smiling, natural lighting",
-                            ],
+                            "prompts": self._build_sample_prompts(trigger_word, config.sample_prompts, config.sample_count),
                             "neg": "",
                             "seed": 42,
                             "walk_seed": True,
@@ -286,6 +315,48 @@ class AIToolkitPlugin(TrainingPlugin):
                 ],
             },
         }
+
+    def _build_sample_prompts(
+        self,
+        trigger_word: str,
+        custom_prompts: list[str] | None,
+        sample_count: int,
+    ) -> list[str]:
+        """
+        Build sample prompts list for AI-Toolkit config.
+
+        Args:
+            trigger_word: The trigger word for the identity
+            custom_prompts: User-provided custom prompts (may contain {trigger_word} placeholder)
+            sample_count: Number of prompts to include
+
+        Returns:
+            List of prompts with trigger word substituted
+        """
+        # Default prompts if none provided
+        default_prompts = [
+            f"a photo of {trigger_word}",
+            f"a portrait of {trigger_word}, professional photography",
+            f"{trigger_word} smiling, natural lighting",
+            f"close-up portrait of {trigger_word}, studio lighting",
+            f"{trigger_word} looking at camera, soft lighting",
+        ]
+
+        if custom_prompts and len(custom_prompts) > 0:
+            # Use custom prompts, substituting {trigger_word} placeholder
+            prompts = []
+            for prompt in custom_prompts:
+                # Replace placeholder with actual trigger word
+                resolved = prompt.replace("{trigger_word}", trigger_word)
+                # If prompt doesn't contain trigger word at all, prepend it
+                if trigger_word not in resolved:
+                    resolved = f"{trigger_word}, {resolved}"
+                prompts.append(resolved)
+        else:
+            prompts = default_prompts
+
+        # Limit to sample_count
+        return prompts[:sample_count]
 
     async def train(
         self,

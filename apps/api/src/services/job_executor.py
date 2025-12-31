@@ -36,8 +36,10 @@ from packages.shared.src.types import (
 )
 from packages.shared.src.events import (
     get_event_bus,
+    get_gpu_metrics,
     TrainingProgressEvent,
     TrainingStage,
+    ProgressBarType,
     ArtifactEvent,
 )
 
@@ -199,6 +201,39 @@ async def execute_training_job(
         job.total_steps = job.config.steps
         jobs_store[job_id] = job
 
+        # Helper to emit stage events with optional progress bar
+        async def emit_stage(
+            stage: TrainingStage,
+            message: str,
+            progress_pct: float = 0.0,
+            progress_bar_id: str | None = None,
+            progress_bar_type: ProgressBarType | None = None,
+            progress_bar_label: str | None = None,
+            progress_bar_value: float | None = None,
+            progress_bar_current: int | None = None,
+            progress_bar_total: int | None = None,
+        ):
+            """Emit a stage event with optional progress bar."""
+            event = TrainingProgressEvent(
+                job_id=job_id,
+                correlation_id=correlation_id,
+                status="running",
+                stage=stage,
+                step=job.current_step,
+                steps_total=job.config.steps,
+                progress_pct=progress_pct,
+                message=message,
+                gpu=get_gpu_metrics(),
+                progress_bar_id=progress_bar_id,
+                progress_bar_type=progress_bar_type,
+                progress_bar_label=progress_bar_label,
+                progress_bar_value=progress_bar_value,
+                progress_bar_current=progress_bar_current,
+                progress_bar_total=progress_bar_total,
+            )
+            await event_bus.publish(job_id, event)
+            job_logger.info(message, event=f"stage.{stage.value}")
+
         # Log and emit start event
         job_logger.start(
             total_steps=job.config.steps,
@@ -212,17 +247,16 @@ async def execute_training_job(
             }
         )
 
-        start_event = TrainingProgressEvent(
-            job_id=job_id,
-            correlation_id=correlation_id,
-            status="running",
-            stage=TrainingStage.INITIALIZING,
-            step=0,
-            steps_total=job.config.steps,
+        # STAGE: Queued/Started
+        await emit_stage(
+            TrainingStage.INITIALIZING,
+            "Job started - initializing training pipeline...",
             progress_pct=0.0,
-            message="Training started",
+            progress_bar_id="init",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Initializing",
+            progress_bar_value=10.0,
         )
-        await event_bus.publish(job_id, start_event)
 
         _record_progress(job_id, JobProgressEvent(
             job_id=job_id,
@@ -238,20 +272,73 @@ async def execute_training_job(
         plugin = get_training_plugin()
         job_logger.info(f"Using training plugin: {plugin.name}", event="plugin.selected")
 
+        await emit_stage(
+            TrainingStage.INITIALIZING,
+            f"Selected training backend: {plugin.name}",
+            progress_pct=0.0,
+            progress_bar_id="init",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Initializing",
+            progress_bar_value=30.0,
+        )
+
         # Validate config
         job_logger.info("Validating configuration", event="config.validate")
+        await emit_stage(
+            TrainingStage.INITIALIZING,
+            "Validating training configuration...",
+            progress_pct=0.0,
+            progress_bar_id="init",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Validating config",
+            progress_bar_value=50.0,
+        )
+
         valid, error = await plugin.validate_config(job.config)
         if not valid:
             raise ValueError(error or "Invalid configuration")
+
+        await emit_stage(
+            TrainingStage.INITIALIZING,
+            "Configuration validated successfully",
+            progress_pct=0.0,
+            progress_bar_id="init",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Config validated",
+            progress_bar_value=70.0,
+        )
 
         # Prepare paths - use loras_dir with versioning
         images_dir = app_config.uploads_dir / job.character_id
         lora_dir = app_config.loras_dir / job.character_id
         lora_dir.mkdir(parents=True, exist_ok=True)
 
+        # STAGE: Preparing dataset
+        await emit_stage(
+            TrainingStage.PREPARING_DATASET,
+            "Preparing training dataset...",
+            progress_pct=0.0,
+            progress_bar_id="dataset",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Preparing dataset",
+            progress_bar_value=0.0,
+        )
+
         # Count training images
         image_count = len(list(images_dir.glob("*.*"))) if images_dir.exists() else 0
         job_logger.info(f"Found {image_count} training images", event="dataset.ready", image_count=image_count)
+
+        await emit_stage(
+            TrainingStage.PREPARING_DATASET,
+            f"Found {image_count} training images",
+            progress_pct=0.0,
+            progress_bar_id="dataset",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Dataset ready",
+            progress_bar_value=100.0,
+            progress_bar_current=image_count,
+            progress_bar_total=image_count,
+        )
 
         # Determine version number
         existing_versions = list(lora_dir.glob("v*.safetensors"))
@@ -259,6 +346,16 @@ async def execute_training_job(
         output_path = lora_dir / f"v{version}.safetensors"
 
         job_logger.info(f"Output path: {output_path}", event="paths.prepared", version=version)
+
+        await emit_stage(
+            TrainingStage.INITIALIZING,
+            f"Output will be saved as v{version}.safetensors",
+            progress_pct=0.0,
+            progress_bar_id="init",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Ready to train",
+            progress_bar_value=100.0,
+        )
 
         # Progress callback with event bus integration
         last_sample_path = None
@@ -314,7 +411,13 @@ async def execute_training_job(
                 )
                 await event_bus.publish(job_id, artifact_event)
 
-            # Emit progress event
+            # Format the message with all details
+            speed_str = f"{iteration_speed:.2f} it/s" if iteration_speed else "--"
+            eta_str = f"{progress.eta_seconds // 60}m {progress.eta_seconds % 60}s" if progress.eta_seconds else "--"
+            loss_str = f"{progress.loss:.4f}" if progress.loss else "--"
+            msg = f"Step {progress.current_step}/{progress.total_steps} | Loss: {loss_str} | Speed: {speed_str} | ETA: {eta_str}"
+
+            # Emit progress event with training progress bar
             progress_event = TrainingProgressEvent(
                 job_id=job_id,
                 correlation_id=correlation_id,
@@ -326,8 +429,16 @@ async def execute_training_job(
                 loss=progress.loss,
                 lr=progress.learning_rate,
                 eta_seconds=progress.eta_seconds,
-                message=progress.message or f"Step {progress.current_step}/{progress.total_steps}",
+                iteration_speed=iteration_speed,
+                gpu=get_gpu_metrics(),
+                message=msg,
                 sample_path=sample_path,
+                progress_bar_id="training",
+                progress_bar_type=ProgressBarType.TRAINING,
+                progress_bar_label=f"Training - Step {progress.current_step}/{progress.total_steps}",
+                progress_bar_value=progress.percentage,
+                progress_bar_current=progress.current_step,
+                progress_bar_total=progress.total_steps,
             )
             await event_bus.publish(job_id, progress_event)
 
@@ -349,6 +460,17 @@ async def execute_training_job(
         # Run training with job_id for sample generation
         job_logger.info("Starting training execution", event="training.execute")
 
+        # STAGE: Loading model (this happens inside plugin.train but we emit before)
+        await emit_stage(
+            TrainingStage.LOADING_MODEL,
+            "Loading FLUX model and preparing for training...",
+            progress_pct=0.0,
+            progress_bar_id="model",
+            progress_bar_type=ProgressBarType.STAGE,
+            progress_bar_label="Loading model",
+            progress_bar_value=0.0,
+        )
+
         result = await plugin.train(
             config=job.config,
             images_dir=images_dir,
@@ -361,6 +483,16 @@ async def execute_training_job(
         training_time = (datetime.now(timezone.utc) - start_time).total_seconds()
 
         if result.success:
+            # STAGE: Exporting
+            await emit_stage(
+                TrainingStage.EXPORTING,
+                "Exporting trained LoRA model...",
+                progress_pct=99.0,
+                progress_bar_id="export",
+                progress_bar_type=ProgressBarType.STAGE,
+                progress_bar_label="Exporting model",
+                progress_bar_value=50.0,
+            )
             # Save training config alongside model
             config_path = lora_dir / "training_config.json"
             config_data = {

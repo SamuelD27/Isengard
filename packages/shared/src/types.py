@@ -91,6 +91,15 @@ class TrainingConfig(BaseModel):
     resolution: int = Field(1024, description="Training resolution")
     lora_rank: int = Field(16, ge=4, le=128, description="LoRA rank")
 
+    # Sample image configuration
+    sample_every_n_steps: int = Field(100, ge=50, le=1000, description="Generate sample images every N steps")
+    sample_count: int = Field(3, ge=1, le=5, description="Number of sample images to generate each time")
+    sample_prompts: list[str] | None = Field(None, description="Custom prompts for sample generation (uses defaults if not provided)")
+
+    # Checkpoint configuration
+    checkpoint_every_n_steps: int = Field(250, ge=100, le=2000, description="Save checkpoint every N steps")
+    max_checkpoints: int = Field(2, ge=1, le=4, description="Maximum number of intermediate checkpoints to keep (final model always saved)")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -99,7 +108,12 @@ class TrainingConfig(BaseModel):
                 "learning_rate": 1e-4,
                 "batch_size": 1,
                 "resolution": 1024,
-                "lora_rank": 16
+                "lora_rank": 16,
+                "sample_every_n_steps": 100,
+                "sample_count": 3,
+                "sample_prompts": ["a photo of {trigger_word}", "portrait of {trigger_word}"],
+                "checkpoint_every_n_steps": 250,
+                "max_checkpoints": 2
             }
         }
 

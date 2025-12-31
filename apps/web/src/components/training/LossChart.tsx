@@ -93,14 +93,14 @@ export function LossChart({ data, currentStep: _currentStep, totalSteps }: LossC
                 dataKey="step"
                 stroke="hsl(var(--muted-foreground))"
                 fontSize={10}
-                tickFormatter={(value) => value.toString()}
+                tickFormatter={(value: number) => value.toString()}
                 domain={[0, totalSteps || 'auto']}
               />
               <YAxis
                 stroke="hsl(var(--muted-foreground))"
                 fontSize={10}
                 domain={yDomain}
-                tickFormatter={(value) => value.toFixed(2)}
+                tickFormatter={(value: number) => value.toFixed(2)}
               />
               <Tooltip content={<CustomTooltip />} />
               <Line

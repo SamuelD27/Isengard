@@ -97,6 +97,12 @@ When replacing a file:
 
 Never leave deprecated files in active directories.
 
+### 7. Error Tracking
+All known errors awaiting fix are documented in `ERROR_LIST.md` at the project root.
+- Before fixing a bug, check if it's already documented there
+- After discovering a new bug, add it to ERROR_LIST.md with full analysis
+- Mark errors as resolved when fixed
+
 ---
 
 ## Current Features

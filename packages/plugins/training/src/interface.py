@@ -19,7 +19,7 @@ from packages.shared.src.types import TrainingConfig, TrainingMethod
 
 class ParameterSchema(TypedDict, total=False):
     """Schema for a single parameter."""
-    type: Literal["int", "float", "enum", "bool", "string"]
+    type: Literal["int", "float", "enum", "bool", "string", "string_list"]
     min: float | int | None
     max: float | int | None
     step: float | None  # UI hint for input step size
