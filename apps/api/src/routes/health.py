@@ -9,30 +9,13 @@ import os
 from fastapi import APIRouter, Request
 
 from packages.shared.src.config import get_global_config
+from ..services.job_executor import (
+    get_training_capabilities,
+    get_generation_capabilities,
+    check_comfyui_health,
+)
 
 router = APIRouter()
-
-
-def _get_training_plugin():
-    """Get training plugin instance based on current mode."""
-    config = get_global_config()
-    if config.is_fast_test:
-        from packages.plugins.training.src.mock_plugin import MockTrainingPlugin
-        return MockTrainingPlugin()
-    else:
-        from packages.plugins.training.src.ai_toolkit import AIToolkitPlugin
-        return AIToolkitPlugin()
-
-
-def _get_image_plugin():
-    """Get image plugin instance based on current mode."""
-    config = get_global_config()
-    if config.is_fast_test:
-        from packages.plugins.image.src.mock_plugin import MockImagePlugin
-        return MockImagePlugin()
-    else:
-        from packages.plugins.image.src.comfyui import ComfyUIPlugin
-        return ComfyUIPlugin()
 
 
 @router.get("/health")
@@ -107,8 +90,8 @@ async def api_info():
     """
     API information and capabilities.
 
-    Returns plugin-reported capability schemas for:
-    - Training: parameter ranges, supported options, wired status
+    Returns capability schemas for:
+    - Training: parameter ranges, supported options
     - Image Generation: toggles, parameters, model variants
 
     The frontend uses this schema to:
@@ -118,16 +101,12 @@ async def api_info():
     """
     config = get_global_config()
 
-    # Get plugin instances for capability reporting
-    training_plugin = _get_training_plugin()
-    image_plugin = _get_image_plugin()
-
     return {
         "name": "Isengard API",
         "version": "0.1.0",
         "mode": config.mode,
-        "training": training_plugin.get_capabilities(),
-        "image_generation": image_plugin.get_capabilities(),
+        "training": get_training_capabilities(),
+        "image_generation": get_generation_capabilities(),
     }
 
 

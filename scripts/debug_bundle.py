@@ -37,18 +37,8 @@ from packages.shared.src.logging import get_job_log_path, get_job_samples_dir, r
 
 
 def get_job_metadata(job_id: str) -> dict | None:
-    """Get job metadata from Redis or file storage."""
+    """Get job metadata from file storage."""
     config = get_global_config()
-
-    # Try to load from Redis
-    try:
-        import redis
-        r = redis.from_url(config.redis_url)
-        job_data = r.hgetall(f"isengard:job:{job_id}")
-        if job_data:
-            return {k.decode(): v.decode() for k, v in job_data.items()}
-    except Exception:
-        pass
 
     # Try to load from file-based storage
     job_file = config.volume_root / "jobs" / f"{job_id}.json"
@@ -110,15 +100,14 @@ def create_debug_bundle(job_id: str, output_path: Path | None = None) -> Path:
         else:
             print(f"  - events.jsonl (not found)")
 
-        # 3. Service logs
-        for service in ["api", "worker", "plugins"]:
-            log_content = collect_service_logs(config, service)
-            if log_content:
-                zf.writestr(f"{job_id}/service_logs/{service}.log", log_content)
-                bundle_contents.append(f"service_logs/{service}.log")
-                print(f"  + service_logs/{service}.log")
-            else:
-                print(f"  - service_logs/{service}.log (not found)")
+        # 3. Service logs (api only since worker is removed)
+        log_content = collect_service_logs(config, "api")
+        if log_content:
+            zf.writestr(f"{job_id}/service_logs/api.log", log_content)
+            bundle_contents.append("service_logs/api.log")
+            print(f"  + service_logs/api.log")
+        else:
+            print(f"  - service_logs/api.log (not found)")
 
         # 4. Sample images
         samples_dir = get_job_samples_dir(job_id)
@@ -136,7 +125,6 @@ def create_debug_bundle(job_id: str, output_path: Path | None = None) -> Path:
         env_snapshot = {
             "ISENGARD_MODE": os.getenv("ISENGARD_MODE", "unknown"),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
-            "USE_REDIS": os.getenv("USE_REDIS", "false"),
             "volume_root": str(config.volume_root),
             "log_dir": str(config.log_dir),
             "python_version": sys.version,

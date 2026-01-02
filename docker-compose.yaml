@@ -14,20 +14,7 @@
 version: '3.8'
 
 services:
-  # Redis for job queue (M2: required for queue, M1: optional for health checks only)
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # Backend API
+  # Backend API (runs jobs in-process via BackgroundTasks)
   api:
     build:
       context: .
@@ -36,7 +23,6 @@ services:
       - "8000:8000"
     environment:
       - ISENGARD_MODE=${ISENGARD_MODE:-fast-test}
-      - REDIS_URL=redis://redis:6379
       - VOLUME_ROOT=/data
       - LOG_DIR=/logs
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -45,9 +31,6 @@ services:
       - ./logs:/logs
       - ./packages:/app/packages:ro
       - ./apps/api/src:/app/apps/api/src:ro
-    depends_on:
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/health')"]
       interval: 30s
@@ -55,28 +38,6 @@ services:
       retries: 3
     # For development: enable hot reload
     command: uvicorn apps.api.src.main:app --host 0.0.0.0 --port 8000 --reload
-
-  # Background worker (M1: jobs run in API process, worker is optional)
-  worker:
-    build:
-      context: .
-      dockerfile: apps/worker/Dockerfile
-    environment:
-      - ISENGARD_MODE=${ISENGARD_MODE:-fast-test}
-      - REDIS_URL=redis://redis:6379
-      - VOLUME_ROOT=/data
-      - LOG_DIR=/logs
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    volumes:
-      - ${VOLUME_ROOT:-./data}:/data
-      - ./logs:/logs
-      - ./packages:/app/packages:ro
-      - ./apps/worker/src:/app/apps/worker/src:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-      api:
-        condition: service_healthy
 
   # Frontend (development mode with hot reload)
   web:
@@ -90,23 +51,7 @@ services:
       - ./apps/web:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - VITE_API_URL=http://api:8000
     command: npm run dev -- --host
     depends_on:
       - api
-
-volumes:
-  redis_data:
-
-# GPU support for production mode
-# Uncomment the following to enable GPU for worker:
-#
-# services:
-#   worker:
-#     deploy:
-#       resources:
-#         reservations:
-#           devices:
-#             - driver: nvidia
-#               count: 1
-#               capabilities: [gpu]

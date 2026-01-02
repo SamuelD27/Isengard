@@ -2,16 +2,16 @@
 Image Generation Endpoints
 
 Handle image generation requests.
-
-M2: Uses Redis for job storage and queue.
+Jobs run in-process via FastAPI BackgroundTasks.
 """
 
 import asyncio
-import os
+import re
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator
 
@@ -25,62 +25,43 @@ from packages.shared.src.types import (
     JobType,
     JobProgressEvent,
 )
-from packages.shared.src.capabilities import is_capability_supported
-from packages.shared.src import redis_client
 from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_GENERATION
 
 from ..services.config_validator import validate_generation_config
-from .health import _get_image_plugin
+from ..services.job_executor import get_generation_capabilities
 
 from ..services.job_executor import (
     execute_generation_job,
-    get_latest_progress,
     get_job_progress_events,
 )
 
 router = APIRouter()
 logger = get_logger("api.routes.generation")
 
-# Feature flag for Redis mode
-USE_REDIS = os.getenv("USE_REDIS", "false").lower() == "true"
-
-# In-memory fallback for M1 compatibility
+# In-memory job storage
 _generation_jobs: dict[str, GenerationJob] = {}
 
 # Reference to character storage
-from .characters import _characters, _load_all_characters
+from .characters import _characters, _load_all_characters, _load_character
 
 
 async def _get_job_or_404(job_id: str) -> GenerationJob:
     """Get job by ID or raise 404."""
-    if USE_REDIS:
-        job_data = await redis_client.get_job(job_id)
-        if not job_data:
-            raise HTTPException(status_code=404, detail=f"Generation job {job_id} not found")
-        return GenerationJob(**job_data)
-    else:
-        if job_id not in _generation_jobs:
-            raise HTTPException(status_code=404, detail=f"Generation job {job_id} not found")
-        return _generation_jobs[job_id]
+    if job_id not in _generation_jobs:
+        raise HTTPException(status_code=404, detail=f"Generation job {job_id} not found")
+    return _generation_jobs[job_id]
 
 
 async def _save_job(job: GenerationJob) -> None:
-    """Save job to storage."""
-    if USE_REDIS:
-        await redis_client.save_job(job.id, job.model_dump(mode="json"))
-    else:
-        _generation_jobs[job.id] = job
+    """Save job to in-memory storage."""
+    _generation_jobs[job.id] = job
 
 
 async def _list_jobs(limit: int = 20) -> list[GenerationJob]:
-    """List jobs from storage."""
-    if USE_REDIS:
-        jobs_data = await redis_client.list_jobs(job_type="generation", limit=limit)
-        return [GenerationJob(**j) for j in jobs_data]
-    else:
-        jobs = list(_generation_jobs.values())
-        jobs.sort(key=lambda j: j.created_at, reverse=True)
-        return jobs[:limit]
+    """List jobs from in-memory storage."""
+    jobs = list(_generation_jobs.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return jobs[:limit]
 
 
 @router.post("", response_model=GenerationJob, status_code=201)
@@ -93,32 +74,33 @@ async def generate_images(
     """
     Start an image generation job.
 
-    Executes generation in background.
+    Executes generation in background via BackgroundTasks.
     Rate limited to 20 requests per minute.
-
-    M1: In-process execution
-    M2: Queue to Redis for worker consumption
     """
     _load_all_characters()
     config = get_global_config()
 
-    # Validate capability
-    if not is_capability_supported("image_generation", "comfyui"):
-        # In fast-test mode, mock plugin is available
-        if not config.is_fast_test:
-            raise HTTPException(
-                status_code=503,
-                detail="Image generation is not available in production mode yet"
-            )
-
-    # Validate config against plugin capabilities
-    image_plugin = _get_image_plugin()
-    capabilities = image_plugin.get_capabilities()
+    # Validate config against capabilities
+    capabilities = get_generation_capabilities()
     validate_generation_config(request.config.model_dump(mode="json"), capabilities)
 
     # Validate LoRA if specified
     if request.config.lora_id:
-        if request.config.lora_id not in _characters:
+        # Check if character exists (with fallback to disk if not in cache)
+        character = None
+        if request.config.lora_id in _characters:
+            character = _characters[request.config.lora_id]
+        else:
+            # Fallback: Try loading directly from disk (handles race condition
+            # when character was just created and cache is stale)
+            character = _load_character(request.config.lora_id)
+            if character:
+                _characters[request.config.lora_id] = character
+                logger.debug("Character loaded from disk (cache miss)", extra={
+                    "character_id": request.config.lora_id,
+                })
+
+        if character is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"Character LoRA {request.config.lora_id} not found"
@@ -143,10 +125,10 @@ async def generate_images(
         created_at=datetime.now(timezone.utc),
     )
 
-    # Save job
+    # Save job to in-memory storage
     await _save_job(job)
 
-    # Log with UELR event type for tracing
+    # Log job creation
     log_extra = {
         "event": "job.created",
         "job_id": job_id,
@@ -154,7 +136,6 @@ async def generate_images(
         "size": f"{request.config.width}x{request.config.height}",
         "count": request.count,
         "lora_id": request.config.lora_id,
-        "use_redis": USE_REDIS,
         "toggles": {
             "use_controlnet": request.config.use_controlnet,
             "use_ipadapter": request.config.use_ipadapter,
@@ -166,31 +147,14 @@ async def generate_images(
         log_extra["interaction_id"] = interaction_id
     logger.info("Generation job created", extra=log_extra)
 
-    if USE_REDIS:
-        # Queue to Redis for worker consumption
-        await redis_client.submit_job(
-            stream=redis_client.STREAM_GENERATION,
-            job_id=job_id,
-            job_type="generation",
-            payload={
-                "config": request.config.model_dump(mode="json"),
-                "count": request.count,
-            },
-            correlation_id=correlation_id,
-        )
-        logger.info("Generation job queued to Redis", extra={
-            "event": "job.queued",
-            "job_id": job_id,
-        })
-    else:
-        # M1 fallback: Execute in-process
-        background_tasks.add_task(
-            execute_generation_job,
-            job=job,
-            jobs_store=_generation_jobs,
-            count=request.count,
-            correlation_id=correlation_id,
-        )
+    # Execute in-process via BackgroundTasks
+    background_tasks.add_task(
+        execute_generation_job,
+        job=job,
+        jobs_store=_generation_jobs,
+        count=request.count,
+        correlation_id=correlation_id,
+    )
 
     return job
 
@@ -211,7 +175,6 @@ async def stream_generation_progress(job_id: str):
     All events include job_id and correlation_id.
     """
     job = await _get_job_or_404(job_id)
-    correlation_id = get_correlation_id()
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         """Generate SSE events for job progress."""
@@ -226,48 +189,35 @@ async def stream_generation_progress(job_id: str):
         )
         yield {"event": "progress", "data": initial_event.model_dump_json()}
 
-        if USE_REDIS:
-            # Stream from Redis
-            async for progress in redis_client.stream_progress(job_id):
-                event = JobProgressEvent(
+        # Poll in-memory store for updates
+        last_event_count = 0
+        while True:
+            await asyncio.sleep(0.3)
+
+            if job_id not in _generation_jobs:
+                break
+
+            current_job = _generation_jobs[job_id]
+
+            # Check for new progress events from executor
+            progress_events = get_job_progress_events(job_id)
+            if len(progress_events) > last_event_count:
+                for event in progress_events[last_event_count:]:
+                    yield {"event": "progress", "data": event.model_dump_json()}
+                last_event_count = len(progress_events)
+
+            # Stop streaming when job completes
+            if current_job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                final_event = JobProgressEvent(
                     job_id=job_id,
                     job_type=JobType.IMAGE_GENERATION,
-                    status=JobStatus(progress.get("status", "running")),
-                    progress=progress.get("progress", 0),
-                    message=progress.get("message", ""),
+                    status=current_job.status,
+                    progress=current_job.progress,
+                    message="Generation finished" if current_job.status == JobStatus.COMPLETED else f"Job {current_job.status.value}",
+                    error=current_job.error_message,
                 )
-                event_name = "complete" if event.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED] else "progress"
-                yield {"event": event_name, "data": event.model_dump_json()}
-        else:
-            # M1 fallback: Poll in-memory store
-            last_event_count = 0
-            while True:
-                await asyncio.sleep(0.3)
-
-                if job_id not in _generation_jobs:
-                    break
-
-                current_job = _generation_jobs[job_id]
-
-                # Check for new progress events from executor
-                progress_events = get_job_progress_events(job_id)
-                if len(progress_events) > last_event_count:
-                    for event in progress_events[last_event_count:]:
-                        yield {"event": "progress", "data": event.model_dump_json()}
-                    last_event_count = len(progress_events)
-
-                # Stop streaming when job completes
-                if current_job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
-                    final_event = JobProgressEvent(
-                        job_id=job_id,
-                        job_type=JobType.IMAGE_GENERATION,
-                        status=current_job.status,
-                        progress=current_job.progress,
-                        message="Generation finished" if current_job.status == JobStatus.COMPLETED else f"Job {current_job.status.value}",
-                        error=current_job.error_message,
-                    )
-                    yield {"event": "complete", "data": final_event.model_dump_json()}
-                    break
+                yield {"event": "complete", "data": final_event.model_dump_json()}
+                break
 
     return EventSourceResponse(event_generator())
 
@@ -288,16 +238,6 @@ async def cancel_generation(job_id: str):
     job.status = JobStatus.CANCELLED
     await _save_job(job)
 
-    if USE_REDIS:
-        # Publish cancellation event
-        await redis_client.publish_progress(
-            job_id=job_id,
-            status="cancelled",
-            progress=job.progress,
-            message="Job cancelled by user",
-            correlation_id=get_correlation_id(),
-        )
-
     logger.info("Generation job cancelled", extra={
         "event": "job.cancelled",
         "job_id": job_id,
@@ -314,21 +254,26 @@ async def list_generation_jobs(limit: int = 20):
     return await _list_jobs(limit)
 
 
-@router.get("/output/{filename}")
-async def get_generation_output(filename: str):
+@router.get("/output/{job_id}/{filename}")
+async def get_generation_output(job_id: str, filename: str):
     """
     Serve a generated image output.
-    """
-    from fastapi.responses import FileResponse
-    import re
 
-    # Sanitize filename to prevent path traversal
+    Files are stored in outputs/{job_id}/{filename}.
+    Both job_id and filename are validated to prevent path traversal.
+    """
+    # Sanitize job_id - allow alphanumeric, hyphens, underscores only
+    safe_job_id = re.sub(r"[^\w\-]", "", job_id)
+    if not safe_job_id or safe_job_id != job_id:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+
+    # Sanitize filename - allow alphanumeric, hyphens, underscores, dots only
     safe_filename = re.sub(r"[^\w\-\.]", "", filename)
     if not safe_filename or safe_filename != filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     config = get_global_config()
-    output_path = config.outputs_dir / safe_filename
+    output_path = config.outputs_dir / safe_job_id / safe_filename
 
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Output file not found")
@@ -339,8 +284,19 @@ async def get_generation_output(filename: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid path")
 
+    # Determine media type based on file extension
+    suffix = output_path.suffix.lower()
+    media_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+    }
+    media_type = media_types.get(suffix, "application/octet-stream")
+
     return FileResponse(
         path=output_path,
-        media_type="image/png",
+        media_type=media_type,
         filename=safe_filename
     )

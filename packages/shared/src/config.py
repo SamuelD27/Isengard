@@ -65,12 +65,6 @@ class Config:
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
-    # Redis settings
-    redis_url: str = "redis://localhost:6379"
-
-    # Worker settings
-    worker_concurrency: int = 1
-
     # ComfyUI settings (internal service - NOT publicly exposed)
     # ComfyUI binds to localhost only for security
     comfyui_host: str = "127.0.0.1"
@@ -176,8 +170,6 @@ def get_config() -> Config:
         TMP_DIR: Path to temp directory
         API_HOST: API bind host
         API_PORT: API bind port
-        REDIS_URL: Redis connection URL
-        WORKER_CONCURRENCY: Max parallel jobs
         COMFYUI_HOST: ComfyUI bind host (default: 127.0.0.1 - internal only)
         COMFYUI_PORT: ComfyUI port (default: 8188)
         COMFYUI_URL: ComfyUI server URL (default: http://127.0.0.1:8188)
@@ -212,8 +204,6 @@ def get_config() -> Config:
         tmp_dir=tmp_dir,
         api_host=os.getenv("API_HOST", "0.0.0.0"),
         api_port=int(os.getenv("API_PORT", "8000")),
-        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379"),
-        worker_concurrency=int(os.getenv("WORKER_CONCURRENCY", "1")),
         comfyui_host=comfyui_host,
         comfyui_port=comfyui_port,
         comfyui_url=comfyui_url,

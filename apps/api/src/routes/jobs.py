@@ -10,7 +10,6 @@ Unified job management including:
 
 import io
 import json
-import os
 import re
 import zipfile
 from datetime import datetime, timezone
@@ -26,7 +25,6 @@ from packages.shared.src.config import get_global_config
 from packages.shared.src.logging import (
     get_logger,
     get_job_log_path,
-    get_job_artifacts_dir,
     get_job_samples_dir,
     get_job_checkpoints_dir,
     get_correlation_id,
@@ -37,7 +35,10 @@ from packages.shared.src.events import (
     TrainingProgressEvent,
     TrainingStage,
 )
-from packages.shared.src import redis_client
+
+# Import in-memory job stores from route modules
+from .training import _training_jobs
+from .generation import _generation_jobs
 
 router = APIRouter()
 logger = get_logger("api.routes.jobs")
@@ -54,6 +55,19 @@ def validate_job_id(job_id: str) -> None:
             status_code=400,
             detail="Invalid job ID format. Only alphanumeric characters, hyphens, and underscores are allowed."
         )
+
+
+def _get_job_data(job_id: str) -> dict | None:
+    """Get job data from in-memory stores."""
+    # Check training jobs
+    if job_id in _training_jobs:
+        job = _training_jobs[job_id]
+        return job.model_dump(mode="json")
+    # Check generation jobs
+    if job_id in _generation_jobs:
+        job = _generation_jobs[job_id]
+        return job.model_dump(mode="json")
+    return None
 
 
 # ============================================
@@ -265,7 +279,6 @@ async def list_job_artifacts(job_id: str):
     """
     validate_job_id(job_id)
 
-    config = get_global_config()
     artifacts = []
 
     # Check samples directory
@@ -326,8 +339,7 @@ async def list_job_artifacts(job_id: str):
 
     # Check for trained model (for training jobs)
     if job_id.startswith("train-"):
-        # Get job data to find character_id
-        job_data = await redis_client.get_job(job_id)
+        job_data = _get_job_data(job_id)
         if job_data and job_data.get("output_path"):
             output_path = Path(job_data["output_path"])
             if output_path.exists():
@@ -483,17 +495,15 @@ async def stream_job_events(job_id: str):
     """
     validate_job_id(job_id)
 
-    config = get_global_config()
-    use_redis = os.getenv("USE_REDIS", "false").lower() == "true"
     correlation_id = get_correlation_id()
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         """Generate SSE events for job progress."""
 
-        # Get initial job state
-        job_data = await redis_client.get_job(job_id)
+        # Get initial job state from in-memory stores
+        job_data = _get_job_data(job_id)
         if not job_data:
-            # Job might be in-memory only, send initial connecting event
+            # Job might not exist yet, send initial connecting event
             yield {
                 "event": "connected",
                 "data": json.dumps({
@@ -520,52 +530,23 @@ async def stream_job_events(job_id: str):
         if job_data and job_data.get("status") in ("completed", "failed", "cancelled"):
             return
 
-        if use_redis:
-            # Stream from Redis
-            try:
-                async for progress in redis_client.stream_progress(job_id):
-                    # Convert Redis progress to our event format
-                    event = TrainingProgressEvent(
-                        job_id=job_id,
-                        correlation_id=progress.get("correlation_id"),
-                        status=progress.get("status", "running"),
-                        stage=TrainingStage.TRAINING,
-                        step=int(progress.get("current_step", 0)),
-                        steps_total=int(progress.get("total_steps", 0)),
-                        progress_pct=float(progress.get("progress", 0)),
-                        loss=float(progress.get("loss")) if progress.get("loss") else None,
-                        message=progress.get("message", ""),
-                        error=progress.get("error"),
-                    )
-                    yield event.to_sse()
+        # Use in-memory event bus for streaming
+        event_bus = get_event_bus()
+        try:
+            async for event_dict in event_bus.subscribe(job_id):
+                if event_dict.get("type") == "keepalive":
+                    yield {"event": "keepalive", "data": "{}"}
+                    continue
 
-                    # Stop on terminal state
-                    if event.status in ("completed", "failed", "cancelled"):
-                        return
-            except Exception as e:
-                logger.error(f"SSE stream error: {e}", extra={"job_id": job_id})
                 yield {
-                    "event": "error",
-                    "data": json.dumps({"error": str(e)}),
+                    "event": "complete" if event_dict.get("status") in ("completed", "failed", "cancelled") else "progress",
+                    "data": json.dumps(event_dict),
                 }
-        else:
-            # Use in-memory event bus
-            event_bus = get_event_bus()
-            try:
-                async for event_dict in event_bus.subscribe(job_id):
-                    if event_dict.get("type") == "keepalive":
-                        yield {"event": "keepalive", "data": "{}"}
-                        continue
 
-                    yield {
-                        "event": "complete" if event_dict.get("status") in ("completed", "failed", "cancelled") else "progress",
-                        "data": json.dumps(event_dict),
-                    }
-
-                    if event_dict.get("status") in ("completed", "failed", "cancelled"):
-                        return
-            except Exception as e:
-                logger.error(f"Event bus stream error: {e}", extra={"job_id": job_id})
+                if event_dict.get("status") in ("completed", "failed", "cancelled"):
+                    return
+        except Exception as e:
+            logger.error(f"Event bus stream error: {e}", extra={"job_id": job_id})
 
     return EventSourceResponse(event_generator())
 
@@ -582,7 +563,7 @@ async def download_debug_bundle(job_id: str):
     The bundle is a ZIP file containing:
     - Job metadata (config, status, timestamps)
     - Complete job log file (events.jsonl)
-    - Last 1000 lines of service logs (api, worker)
+    - Last 1000 lines of service logs (api)
     - Sample images (if any)
     - Environment snapshot (redacted)
     - Directory tree of artifacts
@@ -599,8 +580,8 @@ async def download_debug_bundle(job_id: str):
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         bundle_contents = []
 
-        # 1. Job metadata
-        job_data = await redis_client.get_job(job_id)
+        # 1. Job metadata from in-memory store
+        job_data = _get_job_data(job_id)
         if job_data:
             # Redact sensitive fields
             safe_job_data = {
@@ -620,18 +601,17 @@ async def download_debug_bundle(job_id: str):
             zf.writestr(f"{job_id}/events.jsonl", log_content)
             bundle_contents.append("events.jsonl")
 
-        # 3. Service logs (last 1000 lines each)
-        for service in ["api", "worker"]:
-            service_log = config.log_dir / service / "latest" / f"{service}.log"
-            if service_log.exists():
-                try:
-                    with open(service_log, "r", encoding="utf-8") as f:
-                        lines = f.readlines()[-1000:]
-                    content = redact_sensitive("".join(lines))
-                    zf.writestr(f"{job_id}/service_logs/{service}.log", content)
-                    bundle_contents.append(f"service_logs/{service}.log")
-                except Exception as e:
-                    logger.warning(f"Failed to include {service} logs: {e}")
+        # 3. Service logs (last 1000 lines - api only since worker is removed)
+        service_log = config.log_dir / "api" / "latest" / "api.log"
+        if service_log.exists():
+            try:
+                with open(service_log, "r", encoding="utf-8") as f:
+                    lines = f.readlines()[-1000:]
+                content = redact_sensitive("".join(lines))
+                zf.writestr(f"{job_id}/service_logs/api.log", content)
+                bundle_contents.append("service_logs/api.log")
+            except Exception as e:
+                logger.warning(f"Failed to include api logs: {e}")
 
         # 4. Sample images
         samples_dir = get_job_samples_dir(job_id)
@@ -642,9 +622,7 @@ async def download_debug_bundle(job_id: str):
 
         # 5. Environment snapshot (heavily redacted)
         env_snapshot = {
-            "ISENGARD_MODE": os.getenv("ISENGARD_MODE", "unknown"),
-            "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
-            "USE_REDIS": os.getenv("USE_REDIS", "false"),
+            "ISENGARD_MODE": config.mode,
             "volume_root": str(config.volume_root),
             "log_dir": str(config.log_dir),
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -700,7 +678,7 @@ async def get_job_summary(job_id: str):
     """
     validate_job_id(job_id)
 
-    job_data = await redis_client.get_job(job_id)
+    job_data = _get_job_data(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
 

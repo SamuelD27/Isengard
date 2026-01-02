@@ -11,9 +11,11 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // In Docker: use service name; locally: use VITE_API_URL or fallback
+        target: process.env.VITE_API_URL || 'http://api:8000',
         changeOrigin: true,
       },
     },
