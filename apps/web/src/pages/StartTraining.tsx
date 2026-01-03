@@ -117,6 +117,7 @@ export default function StartTrainingPage() {
   const queryClient = useQueryClient()
   const [selectedCharacter, setSelectedCharacter] = useState<string>('')
   const [selectedPreset, setSelectedPreset] = useState<PresetKey | 'custom'>('balanced')
+  const [baseModel, setBaseModel] = useState<'flux-dev' | 'flux-schnell'>('flux-dev')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showSamplingCheckpoints, setShowSamplingCheckpoints] = useState(false)
   const [showUnavailable, setShowUnavailable] = useState(false)
@@ -180,9 +181,9 @@ export default function StartTrainingPage() {
   })
 
   const startMutation = useMutation({
-    mutationFn: ({ characterId, config, presetName }: { characterId: string; config: ExtendedTrainingConfig; presetName: string }) => {
-      console.log('[Training] Starting training with:', { characterId, config, presetName })
-      return api.startTraining(characterId, config, presetName, 'flux-dev')
+    mutationFn: ({ characterId, config, presetName, baseModel }: { characterId: string; config: ExtendedTrainingConfig; presetName: string; baseModel: string }) => {
+      console.log('[Training] Starting training with:', { characterId, config, presetName, baseModel })
+      return api.startTraining(characterId, config, presetName, baseModel)
     },
     onSuccess: (data) => {
       console.log('[Training] Job created:', data)
@@ -214,6 +215,7 @@ export default function StartTrainingPage() {
         characterId: selectedCharacter,
         config,
         presetName: selectedPreset,
+        baseModel,
       })
     }
   }
@@ -353,6 +355,25 @@ export default function StartTrainingPage() {
               )}
             </div>
           )}
+
+          {/* Base Model Selection */}
+          <div className="space-y-2">
+            <Label htmlFor="base-model">Base Model</Label>
+            <select
+              id="base-model"
+              className="flex h-9 w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground focus:outline-none focus:border-accent"
+              value={baseModel}
+              onChange={(e) => setBaseModel(e.target.value as 'flux-dev' | 'flux-schnell')}
+            >
+              <option value="flux-dev">FLUX.1-dev (High Quality)</option>
+              <option value="flux-schnell">FLUX.1-schnell (Fast)</option>
+            </select>
+            <p className="text-xs text-muted-foreground">
+              {baseModel === 'flux-dev'
+                ? 'Best quality results, requires more training time'
+                : 'Faster training, good for quick iterations'}
+            </p>
+          </div>
 
           {/* Basic Settings */}
           <div className="grid gap-4 md:grid-cols-2">
