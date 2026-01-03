@@ -23,6 +23,13 @@ from packages.shared.src.types import (
     JobType,
     JobProgressEvent,
 )
+from ..models.responses import (
+    ErrorResponse,
+    ErrorCodes,
+    HTTP_400_VALIDATION,
+    HTTP_404_NOT_FOUND,
+    HTTP_500_INTERNAL,
+)
 from ..services.config_validator import validate_training_config
 from ..services.job_executor import get_training_capabilities
 from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_TRAINING
@@ -44,11 +51,21 @@ from .characters import _characters, _load_all_characters, _save_character, _loa
 
 
 async def _get_job_or_404(job_id: str) -> TrainingJob:
-    """Get job by ID or raise 404."""
+    """Get job by ID or raise 404 with structured error."""
     store = get_training_store()
     job = store.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                error="Job not found",
+                details=[{
+                    "code": ErrorCodes.JOB_NOT_FOUND,
+                    "message": f"Training job {job_id} not found",
+                    "field": "job_id",
+                }],
+            ).model_dump(),
+        )
     return job
 
 
@@ -114,7 +131,16 @@ async def list_ongoing_training_jobs():
     return ongoing
 
 
-@router.post("", response_model=TrainingJob, status_code=201)
+@router.post(
+    "",
+    response_model=TrainingJob,
+    status_code=201,
+    responses={
+        400: {"model": ErrorResponse, "description": "Validation error (invalid config or no images)"},
+        404: {"model": ErrorResponse, "description": "Character not found"},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    },
+)
 @rate_limit(**RATE_LIMIT_TRAINING)
 async def start_training(
     http_request: Request,
@@ -126,6 +152,13 @@ async def start_training(
 
     Creates a job and executes it in the background via BackgroundTasks.
     Rate limited to 5 requests per minute.
+
+    Error Codes:
+    - VALIDATION_ERROR: Invalid training configuration
+    - OUT_OF_RANGE: Parameter value outside allowed range
+    - NOT_SUPPORTED: Parameter or feature not supported by backend
+    - CHARACTER_NOT_FOUND: Character does not exist
+    - NO_IMAGES: No training images uploaded for character
     """
     # Ensure characters are loaded
     _load_all_characters()
@@ -151,7 +184,14 @@ async def start_training(
     if character is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Character {request.character_id} not found"
+            detail=ErrorResponse(
+                error="Character not found",
+                details=[{
+                    "code": ErrorCodes.CHARACTER_NOT_FOUND,
+                    "message": f"Character {request.character_id} not found",
+                    "field": "character_id",
+                }],
+            ).model_dump(),
         )
 
     # Check for training images
@@ -160,7 +200,14 @@ async def start_training(
     if not images_dir.exists() or not list(images_dir.glob("*")):
         raise HTTPException(
             status_code=400,
-            detail="No training images uploaded for this character"
+            detail=ErrorResponse(
+                error="No training images",
+                details=[{
+                    "code": ErrorCodes.NO_IMAGES,
+                    "message": "No training images uploaded for this character",
+                    "field": "character_id",
+                }],
+            ).model_dump(),
         )
 
     # Create job with server-generated UUID7-style ID
@@ -279,17 +326,35 @@ async def stream_training_progress(job_id: str):
     return EventSourceResponse(event_generator())
 
 
-@router.post("/{job_id}/cancel", response_model=TrainingJob)
+@router.post(
+    "/{job_id}/cancel",
+    response_model=TrainingJob,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid job state for cancellation"},
+        404: {"model": ErrorResponse, "description": "Job not found"},
+    },
+)
 async def cancel_training(job_id: str):
     """
     Cancel a training job.
+
+    Error Codes:
+    - JOB_NOT_FOUND: Training job does not exist
+    - INVALID_STATE: Job cannot be cancelled (already completed/failed/cancelled)
     """
     job = await _get_job_or_404(job_id)
 
     if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot cancel job in {job.status} state"
+            detail=ErrorResponse(
+                error="Invalid job state",
+                details=[{
+                    "code": ErrorCodes.INVALID_STATE,
+                    "message": f"Cannot cancel job in {job.status.value} state",
+                    "field": "status",
+                }],
+            ).model_dump(),
         )
 
     job.status = JobStatus.CANCELLED
