@@ -225,6 +225,83 @@ class GenerateImageRequest(BaseModel):
 
 
 # ============================================
+# Plugin Interface Result Types
+# ============================================
+
+class TrainingProgress(BaseModel):
+    """
+    Progress update from training backend.
+
+    Used as the callback parameter type in TrainingBackend.train().
+    Simpler than TrainingProgressEvent for plugin implementations.
+    """
+    step: int = Field(..., description="Current training step")
+    total_steps: int = Field(..., description="Total training steps")
+    loss: float | None = Field(None, description="Current loss value")
+    learning_rate: float | None = Field(None, description="Current learning rate")
+    eta_seconds: int | None = Field(None, description="Estimated time remaining")
+    iteration_speed: float | None = Field(None, description="Training speed in iterations/second")
+    message: str = Field("", description="Human-readable status message")
+    sample_path: str | None = Field(None, description="Path to sample image if just generated")
+    checkpoint_path: str | None = Field(None, description="Path to checkpoint if just saved")
+
+    @property
+    def progress_pct(self) -> float:
+        """Calculate progress percentage."""
+        if self.total_steps == 0:
+            return 0.0
+        return (self.step / self.total_steps) * 100.0
+
+
+class TrainingResult(BaseModel):
+    """
+    Result from training backend.
+
+    Returned by TrainingBackend.train() upon completion.
+    """
+    success: bool = Field(..., description="Whether training completed successfully")
+    model_path: str | None = Field(None, description="Path to trained model file")
+    final_loss: float | None = Field(None, description="Final training loss")
+    total_steps: int = Field(0, description="Total steps completed")
+    training_time_seconds: float = Field(0.0, description="Total training time")
+    error_message: str | None = Field(None, description="Error message if failed")
+    checkpoints: list[str] = Field(default_factory=list, description="Paths to saved checkpoints")
+    samples: list[str] = Field(default_factory=list, description="Paths to generated samples")
+
+
+class GenerationProgress(BaseModel):
+    """
+    Progress update from generation backend.
+
+    Used as the callback parameter type in GenerationBackend.generate().
+    """
+    step: int = Field(..., description="Current inference step")
+    total_steps: int = Field(..., description="Total inference steps")
+    message: str = Field("", description="Human-readable status message")
+    preview_path: str | None = Field(None, description="Path to preview image if available")
+
+    @property
+    def progress_pct(self) -> float:
+        """Calculate progress percentage."""
+        if self.total_steps == 0:
+            return 0.0
+        return (self.step / self.total_steps) * 100.0
+
+
+class GenerationResult(BaseModel):
+    """
+    Result from generation backend.
+
+    Returned by GenerationBackend.generate() upon completion.
+    """
+    success: bool = Field(..., description="Whether generation completed successfully")
+    output_paths: list[str] = Field(default_factory=list, description="Paths to generated images")
+    generation_time_seconds: float = Field(0.0, description="Total generation time")
+    seed_used: int | None = Field(None, description="Actual seed used for generation")
+    error_message: str | None = Field(None, description="Error message if failed")
+
+
+# ============================================
 # Job Progress Events (for SSE)
 # ============================================
 
