@@ -146,15 +146,20 @@ def get_training_capabilities() -> dict:
 
 
 def get_generation_capabilities() -> dict:
-    """Return generation capabilities (same for mock and production)."""
+    """Return generation capabilities (same for mock and production).
+
+    Note: ControlNet, IP-Adapter, and FaceDetailer toggles were removed as they
+    are not yet implemented. See CONTRACT_CHANGE_REQUEST.md for future plans.
+    """
     return {
         "backend": "comfyui",
         "model_variants": ["flux-dev", "flux-schnell"],
         "toggles": {
-            "use_upscale": {"supported": True, "description": "2x upscale"},
-            "use_facedetailer": {"supported": False, "description": "Face enhancement"},
-            "use_ipadapter": {"supported": False, "description": "Style transfer"},
-            "use_controlnet": {"supported": False, "description": "Pose guidance"},
+            "use_upscale": {"supported": True, "description": "2x RealESRGAN upscale"},
+            # Future toggles (not yet implemented):
+            # - use_controlnet: Pose/depth guidance (requires ControlNet models + workflows)
+            # - use_ipadapter: Style transfer (requires IP-Adapter models + workflows)
+            # - use_facedetailer: Face enhancement (requires face detection models + workflows)
         },
         "parameters": {
             "width": {"type": "int", "min": 512, "max": 2048, "step": 64, "default": 1024, "wired": True},
@@ -753,8 +758,12 @@ async def _run_comfyui_generation(
                     error_message=f"Cannot connect to ComfyUI at {server_url}",
                 )
 
-            # Select workflow
-            workflow_name = "flux-dev-lora" if lora_path else "flux-schnell"
+            # Select workflow based on model variant, lora, and upscale settings
+            model_variant = config.model_variant or "flux-dev"
+            if lora_path:
+                workflow_name = f"flux-{model_variant.replace('flux-', '')}-lora"
+            else:
+                workflow_name = f"flux-{model_variant.replace('flux-', '')}"
             if config.use_upscale:
                 workflow_name += "-upscale"
 
