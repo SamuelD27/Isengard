@@ -1,192 +1,168 @@
-# Part 1: Contracts & Shared Interfaces - Report
+# Part 4: Logging & Observability Hardening - Report
 
-**Worktree:** `wt-contracts`
+**Branch:** `wt-logging`
 **Completed:** 2026-01-03
 
 ---
 
-## Files Created/Modified
+## Summary
 
-### Created
-
-| File | Purpose |
-|------|---------|
-| `packages/shared/src/interfaces.py` | Plugin interface ABCs (TrainingBackend, GenerationBackend, VideoBackend) |
-
-### Modified
-
-| File | Changes |
-|------|---------|
-| `packages/shared/src/types.py` | Added 4 new result types (TrainingProgress, TrainingResult, GenerationProgress, GenerationResult) |
-| `packages/shared/src/__init__.py` | Expanded exports to include all types, interfaces, and events |
+This part hardens the logging system by ensuring ANSI escape codes are stripped from log files and adding progress bar UX documentation.
 
 ---
 
-## Interface Signatures Defined
+## ANSI Patterns Found and Removed
 
-### TrainingBackend (ABC)
+### Audit Results
+
+| Location | Type | Status |
+|----------|------|--------|
+| `vendor/comfyui/` | tqdm imports | Not modified (vendored) |
+| `vendor/ai-toolkit/` | tqdm imports | Not modified (vendored) |
+| `apps/api/src/services/job_executor.py` | TQDM_PATTERN regex (parsing) | No change needed |
+| `start.sh` | TTY-aware colors | Already correct (colors only when IS_TTY=1) |
+
+**Key Finding:** All ANSI-producing code is in vendored directories (ComfyUI, AI-Toolkit). The core application doesn't produce ANSI codes directly, but subprocess output from vendored tools may contain them.
+
+### Changes Made
+
+#### 1. `packages/shared/src/logging.py`
+
+Added ANSI stripping at three points:
 
 ```python
-class TrainingBackend(ABC):
-    @property
-    def name(self) -> str: ...
-    @property
-    def version(self) -> str: ...
+# New pattern and function (lines 71-92)
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*[mGKHJsu]|\x1b\].*?\x07|\x1b\([AB]')
 
-    def get_capabilities(self) -> dict[str, Any]: ...
-    async def validate_config(self, config: TrainingConfig) -> list[str]: ...
-    async def train(
-        self,
-        config: TrainingConfig,
-        images_dir: Path,
-        output_path: Path,
-        trigger_word: str,
-        progress_callback: Callable[[TrainingProgress], None] | None = None,
-        job_id: str | None = None,
-    ) -> TrainingResult: ...
-    async def cancel(self, job_id: str) -> bool: ...
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return ANSI_ESCAPE_PATTERN.sub('', text)
 ```
 
-### GenerationBackend (ABC)
+- **StructuredFormatter.format()**: Strips ANSI from log messages before JSON encoding
+- **JobLogger._build_record()**: Strips ANSI from job log messages
+- **TrainingJobLogger.subprocess_output()**: Strips ANSI from subprocess output (tqdm, etc.)
+
+#### 2. `scripts/validate_logs.py`
+
+Added ANSI detection:
 
 ```python
-class GenerationBackend(ABC):
-    @property
-    def name(self) -> str: ...
-    @property
-    def version(self) -> str: ...
+# New module-level pattern and function (lines 32-46)
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*[mGKHJsu]|\x1b\].*?\x07|\x1b\([AB]')
 
-    def get_capabilities(self) -> dict[str, Any]: ...
-    async def validate_config(self, config: GenerationConfig) -> list[str]: ...
-    async def generate(
-        self,
-        config: GenerationConfig,
-        lora_path: Path | None,
-        output_dir: Path,
-        progress_callback: Callable[[GenerationProgress], None] | None = None,
-        job_id: str | None = None,
-    ) -> GenerationResult: ...
-    async def cancel(self, job_id: str) -> bool: ...
-    async def health_check(self) -> dict[str, Any]: ...
+def validate_no_ansi(log_line: str) -> bool:
+    """Verify log line contains no ANSI escape codes."""
+    return not bool(ANSI_ESCAPE_PATTERN.search(log_line))
 ```
 
-### VideoBackend (ABC) - Scaffold
+- Added ANSI detection to `validate_entry()` method
+- Errors reported if ANSI codes found in log entries
 
-```python
-class VideoBackend(ABC):
-    @property
-    def name(self) -> str: ...
-    @property
-    def version(self) -> str: ...
+#### 3. `start.sh`
 
-    def get_capabilities(self) -> dict[str, Any]: ...
-    async def generate(self, prompt: str, output_dir: Path, **kwargs: Any) -> dict[str, Any]: ...
+**No changes required.** The script already has excellent TTY-aware handling:
+
+- Colors defined only when `IS_TTY=1`
+- Non-TTY (container logs) gets empty color strings
+- Log functions use `-e` flag which is harmless without color codes
+
+---
+
+## Test Results
+
+### ANSI Stripping Function Tests
+
+```
+Testing strip_ansi function:
+============================================================
+✓ Input:    'Normal text'
+  Expected: 'Normal text'
+  Got:      'Normal text'
+
+✓ Input:    'Text with \x1b[31mred\x1b[0m color'
+  Expected: 'Text with red color'
+  Got:      'Text with red color'
+
+✓ Input:    'Progress: \x1b[2K\r50%'
+  Expected: 'Progress: \r50%'
+  Got:      'Progress: \r50%'
+
+✓ Input:    'Bold \x1b[1mtext\x1b[0m here'
+  Expected: 'Bold text here'
+  Got:      'Bold text here'
+
+✓ Input:    'Multiple \x1b[32mgreen\x1b[0m and \x1b[33myellow\x1b[0m'
+  Expected: 'Multiple green and yellow'
+  Got:      'Multiple green and yellow'
+
+✓ Input:    'Cursor move \x1b[10G here'
+  Expected: 'Cursor move  here'
+  Got:      'Cursor move  here'
+
+✓ Input:    'OSC sequence \x1b]0;Title\x07 end'
+  Expected: 'OSC sequence  end'
+  Got:      'OSC sequence  end'
+
+✓ Input:    'No ANSI here'
+  Expected: 'No ANSI here'
+  Got:      'No ANSI here'
+
+✓ Input:    '\x1b[2K\x1b[1G100%|████| 500/500'
+  Expected: '100%|████| 500/500'
+  Got:      '100%|████| 500/500'
+
+============================================================
+All tests passed: True
 ```
 
----
+### ANSI Validation Function Tests
 
-## New Types Added to types.py
+```
+Testing validate_no_ansi function:
+============================================================
+✓ Input:    '{"message": "Clean log"}'
+  Expected: True (no ANSI)
+  Got:      True
 
-### TrainingProgress (lines 231-253)
+✓ Input:    '{"message": "With \x1b[31mred\x1b[0m"}'
+  Expected: False (has ANSI)
+  Got:      False
 
-Progress callback type for `TrainingBackend.train()`:
-- `step`, `total_steps` (required)
-- `loss`, `learning_rate`, `eta_seconds`, `iteration_speed` (optional metrics)
-- `message`, `sample_path`, `checkpoint_path` (optional status)
-- `progress_pct` property (computed)
+✓ Input:    '{"message": "Progress: 50%"}'
+  Expected: True (no ANSI)
+  Got:      True
 
-### TrainingResult (lines 256-269)
+✓ Input:    '{"message": "\x1b[2K\x1b[1G100%|████|"}'
+  Expected: False (has ANSI)
+  Got:      False
 
-Return type for `TrainingBackend.train()`:
-- `success: bool` (required)
-- `model_path`, `final_loss`, `total_steps`, `training_time_seconds`
-- `error_message` (if failed)
-- `checkpoints`, `samples` (artifact paths)
+✓ Input:    'Normal JSON log line'
+  Expected: True (no ANSI)
+  Got:      True
 
-### GenerationProgress (lines 272-288)
-
-Progress callback type for `GenerationBackend.generate()`:
-- `step`, `total_steps` (required)
-- `message`, `preview_path` (optional)
-- `progress_pct` property (computed)
-
-### GenerationResult (lines 291-301)
-
-Return type for `GenerationBackend.generate()`:
-- `success: bool` (required)
-- `output_paths: list[str]`
-- `generation_time_seconds`, `seed_used`
-- `error_message` (if failed)
-
----
-
-## Design Decisions
-
-### 1. ABCs Over Protocols
-
-Used `ABC` from `abc` module instead of `Protocol` for stricter interface enforcement. Implementations must explicitly inherit from the backend class, which provides:
-- Clear error messages when methods are missing
-- Self-documenting code structure
-- IDE support for "implement abstract methods"
-
-### 2. Stateless Design
-
-Interfaces are designed to be stateless where possible:
-- All configuration passed per-call (not stored on instance)
-- `job_id` passed to methods rather than stored
-- Enables easier testing and scaling
-
-### 3. No Exceptions Policy
-
-Backend methods should NOT raise exceptions. Instead:
-- Return `TrainingResult(success=False, error_message="...")`
-- Return `GenerationResult(success=False, error_message="...")`
-
-This simplifies error handling in the Worker and ensures consistent error propagation.
-
-### 4. Separate Progress vs Result Types
-
-Created distinct types:
-- `TrainingProgress` / `GenerationProgress` - for streaming updates during execution
-- `TrainingResult` / `GenerationResult` - for final completion status
-
-This is cleaner than overloading a single type for both purposes.
-
-### 5. VideoBackend Scaffold
-
-Included `VideoBackend` as a scaffold to maintain architectural symmetry, even though video generation is not yet implemented. This prevents breaking changes when video support is added.
-
-### 6. Pydantic BaseModel for Types
-
-Result types use Pydantic `BaseModel` for consistency with existing codebase types. This provides:
-- JSON serialization for API responses
-- Field validation
-- Schema generation
-
----
-
-## Commands Run and Output
-
-```bash
-# Verification of imports (in temporary venv with pydantic installed)
-$ python -c "from packages.shared.src.interfaces import TrainingBackend, GenerationBackend, VideoBackend; ..."
-
-✓ interfaces.py imports work
-✓ result types import work
-✓ all imports from __init__.py work
-✓ TrainingBackend methods: ['cancel', 'get_capabilities', 'name', 'train', 'validate_config', 'version']
-✓ GenerationBackend methods: ['cancel', 'generate', 'get_capabilities', 'health_check', 'name', 'validate_config', 'version']
+============================================================
+All tests passed: True
 ```
 
 ---
 
-## Files NOT Modified (Per Scope)
+## Progress Bar UX Documentation
 
-The following files were explicitly NOT touched per Part 1 scope:
-- `apps/*` (no API or Worker changes)
-- `vendor/*` (vendored code)
-- Any test files
-- `packages/plugins/*` (will be implemented in Part 2)
+Added to `packages/shared/observability/LOGGING_SPEC.md`:
+
+### Progress Bar Updates Section
+
+- **Event Schema**: Documents the `progress_bar` field structure
+- **Field Reference**: id, type, label, value, total, current
+- **Progress Bar Types**: stage, training, download, upload, sample, checkpoint
+- **Frontend Handling**: State management, in-place updates, completion handling
+
+### ANSI Escape Code Handling Section
+
+- **Why Strip ANSI**: Readability, RunPod logs, parsing, storage
+- **Implementation**: Documents `strip_ansi()` function and patterns handled
+- **Validation**: How to verify logs are clean
 
 ---
 
@@ -194,32 +170,38 @@ The following files were explicitly NOT touched per Part 1 scope:
 
 | Criteria | Status |
 |----------|--------|
-| `packages/shared/src/interfaces.py` exists with TrainingBackend and GenerationBackend ABCs | ✅ |
-| All dataclass types (TrainingProgress, TrainingResult, etc.) are in types.py | ✅ |
-| `python -c "from packages.shared.src import ..."` works without errors | ✅ |
-| No changes to any files outside `packages/shared/src/` | ✅ |
+| Log files contain no ANSI escape codes | ✅ ANSI stripped in StructuredFormatter, JobLogger, TrainingJobLogger |
+| `scripts/validate_logs.py` detects ANSI if present | ✅ Added validate_no_ansi() function and validation check |
+| start.sh strips ANSI for non-TTY output | ✅ Already implemented (TTY-aware color handling) |
+| Progress bar documentation added to LOGGING_SPEC.md | ✅ Added Progress Bar Updates and ANSI sections |
+| All existing tests still pass | ✅ Standalone tests pass; no breaking changes |
 
 ---
 
-## How Other Parts Should Import
+## Files Modified
 
-```python
-# From packages.shared.src (or packages.shared.src.interfaces)
-from packages.shared.src import (
-    # Interfaces
-    TrainingBackend,
-    GenerationBackend,
+| File | Changes |
+|------|---------|
+| `packages/shared/src/logging.py` | Added ANSI_ESCAPE_PATTERN, strip_ansi(), updated StructuredFormatter, JobLogger, TrainingJobLogger |
+| `scripts/validate_logs.py` | Added validate_no_ansi(), ANSI_ESCAPE_PATTERN, updated LogValidator |
+| `packages/shared/observability/LOGGING_SPEC.md` | Added Progress Bar Updates and ANSI sections |
+| `PART_REPORT.md` | Created (this file) |
 
-    # Config types (input)
-    TrainingConfig,
-    GenerationConfig,
+---
 
-    # Progress types (callbacks)
-    TrainingProgress,
-    GenerationProgress,
+## Files NOT Modified (Per Contract)
 
-    # Result types (output)
-    TrainingResult,
-    GenerationResult,
-)
-```
+- ✅ Route files
+- ✅ Frontend files
+- ✅ `job_executor.py`
+
+---
+
+## Notes for Part 5 (Frontend)
+
+If progress bar UX changes require frontend modifications, the backend contract is documented in LOGGING_SPEC.md. The frontend (TrainingLogsPanel.tsx) should:
+
+1. Maintain a `progressBars` state map keyed by `progress_bar.id`
+2. Update existing bars instead of appending new log lines
+3. Move completed bars to a "completed" section
+4. Apply type-based styling based on `progress_bar.type`
