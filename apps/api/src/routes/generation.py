@@ -34,12 +34,13 @@ from ..services.job_executor import (
     execute_generation_job,
     get_job_progress_events,
 )
+from ..services.job_store import get_generation_store
 
 router = APIRouter()
 logger = get_logger("api.routes.generation")
 
-# In-memory job storage
-_generation_jobs: dict[str, GenerationJob] = {}
+# Persistent job storage (backed by JSON files on disk)
+# Initialized lazily on first access via get_generation_store()
 
 # Reference to character storage
 from .characters import _characters, _load_all_characters, _load_character
@@ -47,19 +48,23 @@ from .characters import _characters, _load_all_characters, _load_character
 
 async def _get_job_or_404(job_id: str) -> GenerationJob:
     """Get job by ID or raise 404."""
-    if job_id not in _generation_jobs:
+    store = get_generation_store()
+    job = store.get(job_id)
+    if job is None:
         raise HTTPException(status_code=404, detail=f"Generation job {job_id} not found")
-    return _generation_jobs[job_id]
+    return job
 
 
 async def _save_job(job: GenerationJob) -> None:
-    """Save job to in-memory storage."""
-    _generation_jobs[job.id] = job
+    """Save job to persistent storage."""
+    store = get_generation_store()
+    store.save(job)
 
 
 async def _list_jobs(limit: int = 20) -> list[GenerationJob]:
-    """List jobs from in-memory storage."""
-    jobs = list(_generation_jobs.values())
+    """List jobs from persistent storage."""
+    store = get_generation_store()
+    jobs = store.list_all()
     jobs.sort(key=lambda j: j.created_at, reverse=True)
     return jobs[:limit]
 
@@ -125,8 +130,9 @@ async def generate_images(
         created_at=datetime.now(timezone.utc),
     )
 
-    # Save job to in-memory storage
-    await _save_job(job)
+    # Save job to persistent storage
+    store = get_generation_store()
+    store.save(job)
 
     # Log job creation
     log_extra = {
@@ -148,10 +154,11 @@ async def generate_images(
     logger.info("Generation job created", extra=log_extra)
 
     # Execute in-process via BackgroundTasks
+    # Pass the store's internal dict for backwards compatibility with executor
     background_tasks.add_task(
         execute_generation_job,
         job=job,
-        jobs_store=_generation_jobs,
+        jobs_store=store.get_dict(),
         count=request.count,
         correlation_id=correlation_id,
     )
@@ -189,15 +196,15 @@ async def stream_generation_progress(job_id: str):
         )
         yield {"event": "progress", "data": initial_event.model_dump_json()}
 
-        # Poll in-memory store for updates
+        # Poll persistent store for updates
+        store = get_generation_store()
         last_event_count = 0
         while True:
             await asyncio.sleep(0.3)
 
-            if job_id not in _generation_jobs:
+            current_job = store.get(job_id)
+            if current_job is None:
                 break
-
-            current_job = _generation_jobs[job_id]
 
             # Check for new progress events from executor
             progress_events = get_job_progress_events(job_id)
@@ -208,6 +215,9 @@ async def stream_generation_progress(job_id: str):
 
             # Stop streaming when job completes
             if current_job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                # Persist final job state to disk
+                store.save(current_job)
+
                 final_event = JobProgressEvent(
                     job_id=job_id,
                     job_type=JobType.IMAGE_GENERATION,

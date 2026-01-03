@@ -1,184 +1,198 @@
-# Part 3 Report: ComfyUI Generation Backend + Capability Toggles
+# Part 6: Job Persistence & Storage - Implementation Report
 
-## Date: 2026-01-03
-## Branch: wt-comfyui
+## Summary
 
----
+Implemented persistent job storage for training and generation jobs, ensuring job history survives API restarts.
 
-## 1. Toggle Status
+## Storage Schema Design
 
-### Before Changes
-| Toggle | supported | Description |
-|--------|-----------|-------------|
-| `use_upscale` | `true` | 2x upscale |
-| `use_facedetailer` | `false` | Face enhancement |
-| `use_ipadapter` | `false` | Style transfer |
-| `use_controlnet` | `false` | Pose guidance |
+### Directory Structure
 
-### After Changes
-| Toggle | supported | Description |
-|--------|-----------|-------------|
-| `use_upscale` | `true` | 2x RealESRGAN upscale |
-
-**Removed toggles:** `use_facedetailer`, `use_ipadapter`, `use_controlnet`
-
----
-
-## 2. Decision Made
-
-**OPTION B: Remove unsupported toggles**
-
-Rationale:
-- Toggles with `supported: false` clutter the API contract
-- Frontend already handles dynamic toggle rendering based on capabilities
-- Clean API is preferable to advertising non-functional features
-- Future implementation plan documented in `CONTRACT_CHANGE_REQUEST.md`
-
----
-
-## 3. Workflow Audit Results
-
-### Current Files (8 total)
 ```
-apps/api/workflows/
-├── flux-dev.json               (1469 bytes)
-├── flux-dev-lora.json          (1649 bytes)
-├── flux-dev-upscale.json       (1867 bytes)
-├── flux-dev-lora-upscale.json  (2047 bytes)
-├── flux-schnell.json           (1472 bytes)
-├── flux-schnell-lora.json      (1652 bytes)
-├── flux-schnell-upscale.json   (1870 bytes)
-└── flux-schnell-lora-upscale.json (2050 bytes)
+$VOLUME_ROOT/jobs/
+├── training/
+│   ├── train-abc123.json
+│   ├── train-def456.json
+│   └── ...
+└── generation/
+    ├── gen-xyz789.json
+    ├── gen-uvw012.json
+    └── ...
 ```
 
-### Workflow Node Structure
-All workflows share a common structure:
+### Job File Format
 
-**Base Pipeline:**
-1. `UNETLoader` → Load FLUX UNET model
-2. `DualCLIPLoader` → Load CLIP L + T5XXL encoders
-3. `VAELoader` → Load VAE for decoding
-4. `EmptyLatentImage` → Create latent at target dimensions
-5. `CLIPTextEncodeFlux` → Encode prompt with FLUX-specific encoding
-6. `FluxGuidance` → Apply CFG guidance scale
-7. `KSampler` → Run diffusion sampling (euler/simple scheduler)
-8. `VAEDecode` → Decode latent to RGB
-9. `SaveImage` → Save output with prefix
+Each job is stored as a separate JSON file named `{job_id}.json`. Example:
 
-**LoRA Variants Add:**
-- `LoraLoaderModelOnly` (node 14) → Injects LoRA between UNET load and KSampler
+```json
+{
+  "id": "train-abc123def4",
+  "character_id": "char-001",
+  "status": "completed",
+  "config": {
+    "method": "lora",
+    "steps": 1500,
+    "learning_rate": 0.0001,
+    "batch_size": 1,
+    "resolution": 1024,
+    "lora_rank": 16
+  },
+  "progress": 100.0,
+  "current_step": 1500,
+  "total_steps": 1500,
+  "created_at": "2025-01-03T12:00:00Z",
+  "started_at": "2025-01-03T12:00:05Z",
+  "completed_at": "2025-01-03T12:45:30Z",
+  "output_path": "/runpod-volume/isengard/loras/char-001/v1.safetensors",
+  "base_model": "flux-dev",
+  "preset_name": "balanced"
+}
+```
 
-**Upscale Variants Add:**
-- `UpscaleModelLoader` → Load RealESRGAN_x2plus.pth
-- `ImageUpscaleWithModel` → 2x upscale before save
+## Implementation Details
 
-### Placeholder Tokens
-Workflows use these placeholders for runtime injection:
-- `__LORA_PATH_PLACEHOLDER__` → Replaced with actual LoRA path
-- `__PROMPT_PLACEHOLDER__` → Replaced with user prompt
-- Width/height/seed/steps → Replaced via regex on JSON
+### Files Created
 
----
+| File | Purpose |
+|------|---------|
+| `apps/api/src/services/job_store.py` | Generic JobStore class with JSON file persistence |
 
-## 4. Bug Fixes Applied
+### Files Modified
 
-### 4.1 Workflow Selection Logic Bug
+| File | Changes |
+|------|---------|
+| `apps/api/src/routes/training.py` | Replaced in-memory dict with JobStore |
+| `apps/api/src/routes/generation.py` | Replaced in-memory dict with JobStore |
+| `apps/api/src/main.py` | Added job store initialization and shutdown flush |
+| `apps/api/src/services/__init__.py` | Exported job store functions |
 
-**Location:** `apps/api/src/services/job_executor.py:684`
+### Key Components
 
-**Before (BROKEN):**
+#### JobStore Class (`job_store.py`)
+
 ```python
-workflow_name = "flux-dev-lora" if lora_path else "flux-schnell"
+class JobStore(Generic[T]):
+    """Persistent job storage backed by JSON files."""
+
+    def get(self, job_id: str) -> T | None
+    def list_all(self) -> list[T]
+    def save(self, job: T) -> None
+    def delete(self, job_id: str) -> bool
+    def exists(self, job_id: str) -> bool
+    def count(self) -> int
+    def get_dict(self) -> dict[str, T]  # For executor compatibility
+    def flush_all(self) -> int  # Persist all cached jobs
 ```
 
-This ignored `config.model_variant`, always using dev with LoRA or schnell without.
+#### Singleton Access Functions
 
-**After (FIXED):**
 ```python
-model_variant = config.model_variant or "flux-dev"
-if lora_path:
-    workflow_name = f"flux-{model_variant.replace('flux-', '')}-lora"
-else:
-    workflow_name = f"flux-{model_variant.replace('flux-', '')}"
+get_training_store() -> JobStore[TrainingJob]
+get_generation_store() -> JobStore[GenerationJob]
+migrate_jobs_from_logs() -> dict[str, int]
 ```
 
-Now correctly handles all 8 workflow variants based on:
-- `config.model_variant` (flux-dev or flux-schnell)
-- `lora_path` presence (with or without LoRA)
-- `config.use_upscale` (appends -upscale)
+## Migration Strategy
 
-### 4.2 Capabilities Cleanup
+### Automatic Migration on Startup
 
-**Location:** `apps/api/src/services/job_executor.py:148-173`
+The API automatically migrates jobs from old JSONL log files on startup:
 
-Removed non-functional toggles from the capabilities dictionary. Added docstring explaining removal and reference to CONTRACT_CHANGE_REQUEST.md.
+1. Scans `$VOLUME_ROOT/logs/jobs/*.jsonl`
+2. For each log file not already in the job store:
+   - Parses job.created events for metadata
+   - Parses final status events (completed/failed/cancelled)
+   - Reconstructs job record with available data
+3. Saves migrated jobs to the new JSON store
 
----
+### Migration Code Path
 
-## 5. Test Results
-
-### Manual Verification
-```bash
-# Check the workflow selection patterns are correct:
-model_variant = "flux-dev"
-lora_path = "/path/to/lora.safetensors"
-use_upscale = True
-
-# Expected workflow: "flux-dev-lora-upscale"
-# File exists: apps/api/workflows/flux-dev-lora-upscale.json ✓
-
-model_variant = "flux-schnell"
-lora_path = None
-use_upscale = False
-
-# Expected workflow: "flux-schnell"
-# File exists: apps/api/workflows/flux-schnell.json ✓
+```
+main.py:lifespan()
+  → migrate_jobs_from_logs()
+    → _parse_job_from_log() for each .jsonl file
+    → training_store.save() or generation_store.save()
 ```
 
-### All Workflow Combinations
-| model_variant | lora_path | use_upscale | Expected Workflow | File Exists |
-|---------------|-----------|-------------|-------------------|-------------|
-| flux-dev | None | false | flux-dev | ✓ |
-| flux-dev | None | true | flux-dev-upscale | ✓ |
-| flux-dev | set | false | flux-dev-lora | ✓ |
-| flux-dev | set | true | flux-dev-lora-upscale | ✓ |
-| flux-schnell | None | false | flux-schnell | ✓ |
-| flux-schnell | None | true | flux-schnell-upscale | ✓ |
-| flux-schnell | set | false | flux-schnell-lora | ✓ |
-| flux-schnell | set | true | flux-schnell-lora-upscale | ✓ |
+## Performance Considerations
 
----
+### Read Operations
 
-## 6. Files Modified
+- **O(1)** lookups via in-memory cache
+- No disk I/O for get/list operations after initial load
 
-| File | Lines Changed | Description |
-|------|---------------|-------------|
-| `apps/api/src/services/job_executor.py` | 148-173 | Removed unsupported toggles from capabilities |
-| `apps/api/src/services/job_executor.py` | 683-690 | Fixed workflow selection to respect model_variant |
+### Write Operations
 
-## 7. Files Created
+- **Synchronous** writes to ensure durability
+- **Atomic** file writes via temp file + rename pattern
+- Thread-safe with lock protection
 
-| File | Description |
-|------|-------------|
-| `CONTRACT_CHANGE_REQUEST.md` | Documents future toggle implementation requirements |
-| `PART_REPORT.md` | This report |
+### Persistence Timing
 
----
+| Event | Persistence Trigger |
+|-------|---------------------|
+| Job created | Immediate save |
+| Job reaches terminal state (SSE stream) | Immediate save |
+| API shutdown | flush_all() called |
 
-## 8. Acceptance Criteria Checklist
+### Memory Usage
 
-- [x] Only `use_upscale` appears in generation capabilities
-- [x] Unsupported toggles removed from `get_generation_capabilities()`
-- [x] `CONTRACT_CHANGE_REQUEST.md` documents future toggle implementation
-- [x] Workflow selection logic verified correct for all 8 variants
-- [x] No changes to training code
+- All jobs loaded into memory at startup
+- Acceptable for expected job counts (<10K jobs)
+- For larger scales, consider LRU cache or database
 
----
+## Test Results
 
-## 9. Notes for Next Steps
+### Persistence Test (Simulated)
 
-1. **Frontend:** Should automatically hide ControlNet/IPAdapter/FaceDetailer toggles since they're no longer in capabilities response.
+```
+=== Session 1: Create jobs ===
+Loaded 0 jobs from /tmp/.../jobs/training
+Saved job train-abc123
+Saved job train-def456
+Session 1 has 2 jobs
 
-2. **Testing:** Run full generation test with both model variants and both LoRA/no-LoRA configurations to verify workflow selection.
+=== Files on disk ===
+  train-abc123.json
+  train-def456.json
 
-3. **Future Work:** See `CONTRACT_CHANGE_REQUEST.md` for implementation roadmap of advanced toggles.
+=== Session 2: After restart ===
+Loaded 2 jobs from /tmp/.../jobs/training
+Session 2 has 2 jobs
+
+✓ All persistence tests passed!
+```
+
+### Verification Steps
+
+1. Start API → job stores initialized, load count logged
+2. Create training job → immediate save to `jobs/training/{id}.json`
+3. Job completes (SSE stream) → final state persisted
+4. Restart API → jobs reloaded from disk
+5. List jobs → all previous jobs present
+
+## Backwards Compatibility
+
+### Executor Integration
+
+The job executor receives `jobs_store.get_dict()` - the internal cache dictionary. This maintains compatibility with the existing executor code that updates jobs in-place.
+
+### Log Files
+
+Existing JSONL log files at `$VOLUME_ROOT/logs/jobs/` are preserved and migrated on first startup. Migration is idempotent - already-migrated jobs are skipped.
+
+## Acceptance Criteria Verification
+
+| Criteria | Status |
+|----------|--------|
+| Jobs persist across API restarts | ✅ Verified via test |
+| Job files stored at `$VOLUME_ROOT/jobs/{type}/{id}.json` | ✅ Implemented |
+| Backward compatible with existing log files | ✅ Migration implemented |
+| No impact on job execution performance | ✅ Read ops use in-memory cache |
+
+## Future Improvements
+
+1. **Periodic Flush**: Add background task to periodically persist in-progress jobs
+2. **Job Cleanup**: Add retention policy to delete old completed/failed jobs
+3. **Database Migration**: For larger scales, migrate to SQLite or PostgreSQL
+4. **Compression**: Compress older job files to reduce disk usage
