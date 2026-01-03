@@ -4,7 +4,7 @@
 # This script runs on pod startup to:
 # 1. Configure SSH access
 # 2. Download required models (R2 first, fallback to HuggingFace)
-# 3. Start all services (Redis, API, Worker, ComfyUI)
+# 3. Start all services (API, ComfyUI, nginx)
 
 set -e
 
@@ -29,18 +29,44 @@ R2_ENDPOINT="${R2_ENDPOINT:-https://e6b3925ef3896465b73c442be466db90.r2.cloudfla
 R2_BUCKET="${R2_BUCKET:-isengard-models}"
 
 # ============================================================
-# Configuration
+# Configuration - Auto-detect volume mount point
 # ============================================================
-export VOLUME_ROOT="${VOLUME_ROOT:-/runpod-volume/isengard}"
-export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+# RunPod network volumes mount at /workspace by default
+# Detection order: explicit env var > /workspace > /runpod-volume > ./data
+# Note: Using echo here since log functions aren't defined yet
+if [ -n "${VOLUME_ROOT:-}" ]; then
+    # Explicit VOLUME_ROOT set - use it
+    export VOLUME_ROOT="${VOLUME_ROOT}"
+    echo "[CONFIG] Using explicit VOLUME_ROOT: ${VOLUME_ROOT}"
+elif [ -d "/workspace" ]; then
+    # RunPod network volume default mount point
+    export VOLUME_ROOT="/workspace/isengard"
+    echo "[CONFIG] Detected RunPod network volume at /workspace"
+elif [ -d "/runpod-volume" ]; then
+    # Legacy/custom mount point
+    export VOLUME_ROOT="/runpod-volume/isengard"
+    echo "[CONFIG] Detected legacy volume at /runpod-volume"
+else
+    # Local development fallback
+    export VOLUME_ROOT="./data"
+    echo "[CONFIG] Using local development fallback: ./data"
+fi
+
 export COMFYUI_URL="${COMFYUI_URL:-http://localhost:8188}"
-export WORKER_NAME="${WORKER_NAME:-runpod-worker-1}"
 export LOG_DIR="${VOLUME_ROOT}/logs"
 export ISENGARD_MODE="${ISENGARD_MODE:-production}"
 
+# Set HuggingFace cache to persistent storage
+HF_CACHE="${VOLUME_ROOT}/cache/huggingface"
+export HF_HOME="${HF_CACHE}"
+export TRANSFORMERS_CACHE="${HF_CACHE}"
+
 MODELS_DIR="${VOLUME_ROOT}/models"
 COMFYUI_MODELS="${VOLUME_ROOT}/comfyui/models"
-HF_CACHE="${VOLUME_ROOT}/cache/huggingface"
+
+echo "[CONFIG] VOLUME_ROOT=${VOLUME_ROOT}"
+echo "[CONFIG] LOG_DIR=${LOG_DIR}"
+echo "[CONFIG] HF_CACHE=${HF_CACHE}"
 
 # ============================================================
 # LOGGING SYSTEM (TTY-aware, container-safe)
@@ -128,8 +154,8 @@ phase_failed() {
 # ============================================================
 # STARTUP BANNER
 # ============================================================
-SCRIPT_VERSION="v3.0.0-vendored"
-BUILD_DATE="2025-12-31"
+SCRIPT_VERSION="v3.1.0"
+BUILD_DATE="2026-01-03"
 
 # Generate SHA256 of this script for verification
 SCRIPT_SHA=$(sha256sum /start.sh 2>/dev/null | cut -c1-12 || echo "unknown")
@@ -144,40 +170,29 @@ else
     AITOOLKIT_COMMIT="unknown"
 fi
 
-# Banner - simplified for container logs, fancy for TTY
+# Banner - Always show ASCII art (works in both TTY and container logs)
 echo ""
-if [ "$IS_TTY" = "1" ]; then
-    # Full ASCII art banner for interactive terminals
-    echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}   ${GREEN}██╗███████╗███████╗███╗   ██╗ ██████╗  █████╗ ██████╗ ██████╗${NC}  ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${GREEN}██║██╔════╝██╔════╝████╗  ██║██╔════╝ ██╔══██╗██╔══██╗██╔══██╗${NC} ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${GREEN}██║███████╗█████╗  ██╔██╗ ██║██║  ███╗███████║██████╔╝██║  ██║${NC} ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${GREEN}██║╚════██║██╔══╝  ██║╚██╗██║██║   ██║██╔══██║██╔══██╗██║  ██║${NC} ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${GREEN}██║███████║███████╗██║ ╚████║╚██████╔╝██║  ██║██║  ██║██████╔╝${NC} ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${GREEN}╚═╝╚══════╝╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝${NC}  ${BLUE}║${NC}"
-    echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
-else
-    # Clean text banner for container logs
-    echo "============================================================"
-    echo "  ISENGARD - Identity LoRA Training Platform"
-    echo "============================================================"
-fi
+echo "╔════════════════════════════════════════════════════════════════════╗"
+echo "║                                                                    ║"
+echo "║   ██╗███████╗███████╗███╗   ██╗ ██████╗  █████╗ ██████╗ ██████╗    ║"
+echo "║   ██║██╔════╝██╔════╝████╗  ██║██╔════╝ ██╔══██╗██╔══██╗██╔══██╗   ║"
+echo "║   ██║███████╗█████╗  ██╔██╗ ██║██║  ███╗███████║██████╔╝██║  ██║   ║"
+echo "║   ██║╚════██║██╔══╝  ██║╚██╗██║██║   ██║██╔══██║██╔══██╗██║  ██║   ║"
+echo "║   ██║███████║███████╗██║ ╚████║╚██████╔╝██║  ██║██║  ██║██████╔╝   ║"
+echo "║   ╚═╝╚══════╝╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝    ║"
+echo "║                                                                    ║"
+echo "║            Identity LoRA Training + Image Generation               ║"
+echo "╚════════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "  Version: ${SCRIPT_VERSION}"
-echo "  Build:   ${BUILD_DATE}"
-echo "  SHA256:  ${SCRIPT_SHA}"
+echo "  Version: ${SCRIPT_VERSION}    Build: ${BUILD_DATE}    SHA: ${SCRIPT_SHA}"
+echo "  Volume:  ${VOLUME_ROOT}"
 echo ""
-echo "  Vendored Engines (pinned, deterministic builds):"
-echo "    - ComfyUI:    ${COMFYUI_COMMIT} (internal, 127.0.0.1:8188)"
-echo "    - AI-Toolkit: ${AITOOLKIT_COMMIT} (baked into image)"
+echo "  Vendored Engines:"
+echo "    ComfyUI:    ${COMFYUI_COMMIT} (internal @ 127.0.0.1:8188)"
+echo "    AI-Toolkit: ${AITOOLKIT_COMMIT}"
 echo ""
-echo "  Features:"
-echo "    - SSH access on TCP port 22"
-echo "    - Fast parallel model downloads"
-echo "    - nginx reverse proxy (port 3000 -> API 8000)"
-echo "    - Vendored engines (no runtime cloning)"
-echo "    - SSE streaming support"
-echo "    - Persistent volume storage"
+echo "  Exposed Services:"
+echo "    SSH:  port 22      Web GUI: port 3000      API: port 8000"
 echo ""
 
 # ============================================================
@@ -231,8 +246,9 @@ mkdir -p "${COMFYUI_MODELS}/vae"
 mkdir -p "${COMFYUI_MODELS}/clip"
 mkdir -p "${COMFYUI_MODELS}/unet"
 mkdir -p "${HF_CACHE}"
+mkdir -p "${VOLUME_ROOT}/cache/torch"
+mkdir -p "${VOLUME_ROOT}/tmp"
 mkdir -p "${LOG_DIR}/api"
-mkdir -p "${LOG_DIR}/worker"
 mkdir -p "${VOLUME_ROOT}/characters"
 mkdir -p "${VOLUME_ROOT}/uploads"
 mkdir -p "${VOLUME_ROOT}/outputs"
@@ -485,33 +501,31 @@ else
 fi
 
 # ============================================================
-# 5. START REDIS
+# 5. REDIS (REMOVED - Jobs now run in-process)
 # ============================================================
-header "Starting Redis"
-
-if ! pgrep -x "redis-server" > /dev/null; then
-    log "Starting Redis server..."
-    redis-server --daemonize yes --port 6379
-    sleep 2
-    redis-cli ping > /dev/null 2>&1 && log "Redis started" || error "Redis failed"
-else
-    log "Redis already running"
-fi
+# Redis was removed in simplification commit 77f8c3a.
+# Jobs now run via FastAPI BackgroundTasks, not a separate worker.
 
 # ============================================================
 # 6. START COMFYUI (Internal Service - NOT publicly exposed)
 # ============================================================
 header "Starting ComfyUI (Internal Service)"
 
-COMFYUI_DIR="/opt/ComfyUI"
+# ComfyUI path: prefer /workspace/ComfyUI if exists, else /opt/ComfyUI
+if [ -d "/workspace/ComfyUI" ]; then
+    COMFYUI_DIR="/workspace/ComfyUI"
+else
+    COMFYUI_DIR="/opt/ComfyUI"
+fi
+
 # ComfyUI binds to localhost only - it's an internal service
 COMFYUI_HOST="${COMFYUI_HOST:-127.0.0.1}"
 COMFYUI_PORT="${COMFYUI_PORT:-8188}"
 
 if [ -d "$COMFYUI_DIR" ]; then
-    if ! pgrep -f "main.py.*ComfyUI" > /dev/null; then
-        log "Starting ComfyUI (binding to ${COMFYUI_HOST}:${COMFYUI_PORT})..."
-        log "  Note: ComfyUI is an INTERNAL service, not exposed externally"
+    if ! pgrep -f "python.*main.py.*${COMFYUI_PORT}" > /dev/null; then
+        log "Starting ComfyUI from ${COMFYUI_DIR}..."
+        log "  Binding to ${COMFYUI_HOST}:${COMFYUI_PORT} (internal only)"
 
         # Link models to ComfyUI directories
         mkdir -p "${COMFYUI_DIR}/models/checkpoints" "${COMFYUI_DIR}/models/loras" "${COMFYUI_DIR}/models/vae" "${COMFYUI_DIR}/models/clip" "${COMFYUI_DIR}/models/unet"
@@ -530,10 +544,25 @@ if [ -d "$COMFYUI_DIR" ]; then
         nohup python main.py --listen "${COMFYUI_HOST}" --port "${COMFYUI_PORT}" > "${LOG_DIR}/comfyui.log" 2>&1 &
 
         log "Waiting for ComfyUI..."
+        COMFYUI_STARTED=0
         for i in {1..30}; do
-            curl -s "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" > /dev/null 2>&1 && { log "ComfyUI started (internal: ${COMFYUI_HOST}:${COMFYUI_PORT})"; break; }
+            if curl -s "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" > /dev/null 2>&1; then
+                log "ComfyUI started (internal: ${COMFYUI_HOST}:${COMFYUI_PORT})"
+                COMFYUI_STARTED=1
+                break
+            fi
             sleep 2
         done
+
+        if [ "$COMFYUI_STARTED" -eq 0 ]; then
+            error "ComfyUI failed to start after 60 seconds"
+            error "Check log: ${LOG_DIR}/comfyui.log"
+            if [ -f "${LOG_DIR}/comfyui.log" ]; then
+                echo "--- Last 20 lines of ComfyUI log ---"
+                tail -20 "${LOG_DIR}/comfyui.log"
+                echo "--- End of log ---"
+            fi
+        fi
     else
         log "ComfyUI already running"
     fi
@@ -552,7 +581,6 @@ if ! pgrep -f "uvicorn.*apps.api" > /dev/null; then
     log "Starting API server..."
 
     export PYTHONPATH=/app
-    export USE_REDIS=true
 
     nohup uvicorn apps.api.src.main:app \
         --host 0.0.0.0 \
@@ -647,22 +675,10 @@ else
 fi
 
 # ============================================================
-# 9. START ISENGARD WORKER
+# 9. WORKER (REMOVED - Jobs now run in-process)
 # ============================================================
-header "Starting Isengard Worker"
-
-if ! pgrep -f "apps.worker.src.main" > /dev/null; then
-    log "Starting Worker..."
-
-    export PYTHONPATH=/app
-    export USE_REDIS=true
-
-    nohup python -m apps.worker.src.main > "${LOG_DIR}/worker/startup.log" 2>&1 &
-    sleep 3
-    pgrep -f "apps.worker.src.main" > /dev/null && log "Worker started" || error "Worker failed"
-else
-    log "Worker already running"
-fi
+# Worker was removed in simplification commit 77f8c3a.
+# Jobs now run via FastAPI BackgroundTasks within the API process.
 
 # ============================================================
 # 10. FINAL STATUS
@@ -672,11 +688,9 @@ header "Startup Complete"
 echo ""
 log "Services:"
 echo "  SSH:     $(pgrep -x sshd > /dev/null && echo '✓ port 22 (exposed)' || echo '✗')"
-echo "  Redis:   $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✓ port 6379 (internal)' || echo '✗')"
 echo "  ComfyUI: $(curl -s "http://${COMFYUI_HOST}:${COMFYUI_PORT}/system_stats" > /dev/null 2>&1 && echo "✓ ${COMFYUI_HOST}:${COMFYUI_PORT} (internal only)" || echo '✗')"
 echo "  API:     $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✓ port 8000 (exposed)' || echo '✗')"
 echo "  Web:     $(curl -s http://localhost:3000 > /dev/null 2>&1 && echo '✓ port 3000 (exposed)' || echo '✗')"
-echo "  Worker:  $(pgrep -f 'apps.worker.src.main' > /dev/null && echo '✓' || echo '✗')"
 echo ""
 log "Models:"
 echo "  FLUX.1-dev:     $([ -f "${COMFYUI_MODELS}/checkpoints/flux1-dev.safetensors" ] && echo '✓' || echo '✗')"
@@ -687,32 +701,71 @@ echo "  T5-XXL:         $([ -f "${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors" ]
 echo ""
 
 # ============================================================
-# 11. VERIFY VENDORED AI-TOOLKIT (baked into image)
+# 11. SETUP VENDORS ON NETWORK VOLUME (AI-Toolkit + ComfyUI)
 # ============================================================
-header "Verifying AI-Toolkit"
+header "Setting up Vendors on Network Volume"
 
-# AI-Toolkit is vendored at /app/vendor/ai-toolkit (no runtime cloning)
-AITOOLKIT_PATH="${AITOOLKIT_PATH:-/app/vendor/ai-toolkit}"
+# Set tmp and cache directories on network volume
+if [ -d "/workspace" ]; then
+    mkdir -p "${VOLUME_ROOT}/tmp"
+    export TMPDIR="${VOLUME_ROOT}/tmp"
+    export TORCH_HOME="${VOLUME_ROOT}/cache/torch"
+    log "TMPDIR set to ${TMPDIR}"
+fi
 
-if [ -d "${AITOOLKIT_PATH}" ]; then
-    log "AI-Toolkit verified at ${AITOOLKIT_PATH}"
-    # Check for key files
-    if [ -f "${AITOOLKIT_PATH}/run.py" ]; then
-        log_success "AI-Toolkit run.py found"
+# --- AI-Toolkit ---
+WORKSPACE_AITOOLKIT="/workspace/ai-toolkit"
+
+if [ -d "/workspace" ]; then
+    if [ ! -d "${WORKSPACE_AITOOLKIT}" ]; then
+        log "Cloning AI-Toolkit to network volume..."
+        git clone https://github.com/ostris/ai-toolkit.git "${WORKSPACE_AITOOLKIT}" 2>&1 | tail -5
+        log_success "AI-Toolkit cloned to ${WORKSPACE_AITOOLKIT}"
     else
-        log_warn "AI-Toolkit run.py not found - training may fail"
+        log "AI-Toolkit already exists at ${WORKSPACE_AITOOLKIT}"
     fi
-
-    # Verify Python can import required modules
-    if python -c "import torch; print(f'PyTorch {torch.__version__}')" 2>/dev/null; then
-        PYTORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
-        log_success "PyTorch ${PYTORCH_VER} available for training"
-    else
-        log_warn "PyTorch not available - training may fail"
-    fi
+    export AITOOLKIT_PATH="${WORKSPACE_AITOOLKIT}"
 else
-    log_warn "AI-Toolkit not found at ${AITOOLKIT_PATH}"
-    log_warn "Training will not work. Rebuild image with vendored AI-Toolkit."
+    export AITOOLKIT_PATH="${AITOOLKIT_PATH:-/app/vendor/ai-toolkit}"
+fi
+
+if [ -f "${AITOOLKIT_PATH}/run.py" ]; then
+    log_success "AI-Toolkit verified at ${AITOOLKIT_PATH}"
+else
+    log_warn "AI-Toolkit run.py not found at ${AITOOLKIT_PATH}"
+fi
+
+# --- ComfyUI ---
+WORKSPACE_COMFYUI="/workspace/ComfyUI"
+
+if [ -d "/workspace" ]; then
+    if [ ! -d "${WORKSPACE_COMFYUI}" ]; then
+        log "Cloning ComfyUI to network volume..."
+        git clone https://github.com/comfyanonymous/ComfyUI.git "${WORKSPACE_COMFYUI}" 2>&1 | tail -5
+        log_success "ComfyUI cloned to ${WORKSPACE_COMFYUI}"
+        # Install ComfyUI requirements
+        log "Installing ComfyUI requirements..."
+        pip install -q -r "${WORKSPACE_COMFYUI}/requirements.txt" 2>&1 | tail -3 || true
+    else
+        log "ComfyUI already exists at ${WORKSPACE_COMFYUI}"
+    fi
+    export COMFYUI_PATH="${WORKSPACE_COMFYUI}"
+else
+    export COMFYUI_PATH="/opt/ComfyUI"
+fi
+
+if [ -f "${COMFYUI_PATH}/main.py" ]; then
+    log_success "ComfyUI verified at ${COMFYUI_PATH}"
+else
+    log_warn "ComfyUI main.py not found at ${COMFYUI_PATH}"
+fi
+
+# Verify PyTorch
+if python -c "import torch; print(f'PyTorch {torch.__version__}')" 2>/dev/null; then
+    PYTORCH_VER=$(python -c "import torch; print(torch.__version__)" 2>/dev/null)
+    log_success "PyTorch ${PYTORCH_VER} available"
+else
+    log_warn "PyTorch not available"
 fi
 
 echo ""
@@ -765,11 +818,10 @@ echo "    - SSH:     port 22"
 echo ""
 echo "  INTERNAL Services (not accessible from host):"
 echo "    - ComfyUI: http://${COMFYUI_HOST}:${COMFYUI_PORT} (container-internal only)"
-echo "    - Redis:   localhost:6379 (container-internal only)"
 echo ""
-echo "  Vendored Engines:"
-echo "    - ComfyUI:    ${COMFYUI_COMMIT} @ /opt/ComfyUI"
-echo "    - AI-Toolkit: ${AITOOLKIT_COMMIT} @ ${AITOOLKIT_PATH}"
+echo "  Vendors (on network volume):"
+echo "    - ComfyUI:    @ ${COMFYUI_DIR}"
+echo "    - AI-Toolkit: @ ${AITOOLKIT_PATH}"
 
 # Keep container running
 tail -f /dev/null

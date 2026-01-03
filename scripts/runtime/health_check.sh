@@ -31,16 +31,10 @@ check_comfyui() {
     return $?
 }
 
-check_redis() {
-    redis-cli ping 2>/dev/null | grep -q PONG
-    return $?
-}
-
 # Output as JSON for structured logging
 output_status() {
     local api_status="unknown"
     local comfyui_status="unknown"
-    local redis_status="unknown"
     local overall="healthy"
 
     if check_api; then
@@ -59,14 +53,7 @@ output_status() {
         [ "$overall" = "healthy" ] && overall="degraded"
     fi
 
-    if check_redis; then
-        redis_status="healthy"
-    else
-        redis_status="unhealthy"
-        overall="unhealthy"
-    fi
-
-    echo "{\"status\": \"${overall}\", \"api\": \"${api_status}\", \"comfyui\": \"${comfyui_status}\", \"redis\": \"${redis_status}\"}"
+    echo "{\"status\": \"${overall}\", \"api\": \"${api_status}\", \"comfyui\": \"${comfyui_status}\"}"
 
     if [ "$overall" = "unhealthy" ]; then
         return 1
@@ -90,15 +77,6 @@ case "$CHECK_MODE" in
             exit 0
         else
             echo '{"status": "unhealthy", "service": "comfyui"}'
-            exit 1
-        fi
-        ;;
-    redis)
-        if check_redis; then
-            echo '{"status": "healthy", "service": "redis"}'
-            exit 0
-        else
-            echo '{"status": "unhealthy", "service": "redis"}'
             exit 1
         fi
         ;;

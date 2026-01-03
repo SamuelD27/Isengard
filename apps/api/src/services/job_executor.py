@@ -478,6 +478,8 @@ async def _run_aitoolkit_training(
             "PYTHONUNBUFFERED": "1",
             "PYTHONPATH": f"{aitoolkit_path}:{os.environ.get('PYTHONPATH', '')}",
             "HF_HOME": str(app_config.cache_dir / "huggingface"),
+            "TORCH_HOME": str(app_config.cache_dir / "torch"),
+            "TMPDIR": str(app_config.volume_root / "tmp"),
         }
 
         process = subprocess.Popen(

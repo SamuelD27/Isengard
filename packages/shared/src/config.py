@@ -31,19 +31,23 @@ def _resolve_volume_root() -> Path:
 
     Resolution Order:
     1. Explicit VOLUME_ROOT env var
-    2. /runpod-volume/isengard if /runpod-volume exists
-    3. /workspace/isengard if /workspace exists
+    2. /workspace/isengard if /workspace exists (RunPod network volume default)
+    3. /runpod-volume/isengard if /runpod-volume exists (legacy/custom mount)
     4. ./data (local fallback)
+
+    Note: RunPod network volumes mount at /workspace by default.
     """
     explicit = os.getenv("VOLUME_ROOT")
     if explicit:
         return Path(explicit)
 
-    if os.path.exists("/runpod-volume"):
-        return Path("/runpod-volume/isengard")
-
+    # RunPod network volume default mount point
     if os.path.exists("/workspace"):
         return Path("/workspace/isengard")
+
+    # Legacy/custom mount point
+    if os.path.exists("/runpod-volume"):
+        return Path("/runpod-volume/isengard")
 
     return Path("./data")
 
@@ -58,8 +62,8 @@ class Config:
 
     # Paths - resolved based on environment
     volume_root: Path = field(default_factory=_resolve_volume_root)
-    log_dir: Path = field(default_factory=lambda: Path("./logs"))
-    tmp_dir: Path = field(default_factory=lambda: Path("./tmp"))
+    log_dir: Path = field(default_factory=lambda: _resolve_volume_root() / "logs")
+    tmp_dir: Path = field(default_factory=lambda: _resolve_volume_root() / "tmp")
 
     # API settings
     api_host: str = "0.0.0.0"
@@ -71,8 +75,8 @@ class Config:
     comfyui_port: int = 8188
     comfyui_url: str = "http://127.0.0.1:8188"
 
-    # AI-Toolkit settings (vendored path)
-    aitoolkit_path: Path = field(default_factory=lambda: Path("/app/vendor/ai-toolkit"))
+    # AI-Toolkit path (prefers /workspace/ai-toolkit if exists, else vendored)
+    aitoolkit_path: Path = field(default_factory=lambda: Path("/workspace/ai-toolkit") if os.path.exists("/workspace/ai-toolkit") else Path("/app/vendor/ai-toolkit"))
 
     # Logging
     log_level: str = "INFO"
@@ -173,7 +177,7 @@ def get_config() -> Config:
         COMFYUI_HOST: ComfyUI bind host (default: 127.0.0.1 - internal only)
         COMFYUI_PORT: ComfyUI port (default: 8188)
         COMFYUI_URL: ComfyUI server URL (default: http://127.0.0.1:8188)
-        AITOOLKIT_PATH: Path to vendored AI-Toolkit (default: /app/vendor/ai-toolkit)
+        AITOOLKIT_PATH: Path to AI-Toolkit (default: /workspace/ai-toolkit or /app/vendor/ai-toolkit)
         LOG_LEVEL: Minimum log level
         LOG_TO_FILE: 'true' or 'false'
         LOG_TO_STDOUT: 'true' or 'false'
@@ -184,17 +188,18 @@ def get_config() -> Config:
     # Resolve volume root
     volume_root = _resolve_volume_root()
 
-    # Log directory can be overridden
-    log_dir = Path(os.getenv("LOG_DIR", "./logs"))
-    tmp_dir = Path(os.getenv("TMP_DIR", "./tmp"))
+    # Log and tmp directories default to volume_root subdirectories
+    log_dir = Path(os.getenv("LOG_DIR", str(volume_root / "logs")))
+    tmp_dir = Path(os.getenv("TMP_DIR", str(volume_root / "tmp")))
 
     # ComfyUI internal service settings
     comfyui_host = os.getenv("COMFYUI_HOST", "127.0.0.1")
     comfyui_port = int(os.getenv("COMFYUI_PORT", "8188"))
     comfyui_url = os.getenv("COMFYUI_URL", f"http://{comfyui_host}:{comfyui_port}")
 
-    # AI-Toolkit vendored path
-    aitoolkit_path = Path(os.getenv("AITOOLKIT_PATH", "/app/vendor/ai-toolkit"))
+    # AI-Toolkit path (prefers /workspace if exists)
+    aitoolkit_default = "/workspace/ai-toolkit" if os.path.exists("/workspace/ai-toolkit") else "/app/vendor/ai-toolkit"
+    aitoolkit_path = Path(os.getenv("AITOOLKIT_PATH", aitoolkit_default))
 
     config = Config(
         mode=mode,

@@ -49,11 +49,18 @@ isengard/
 
 | Environment | Location | Purpose |
 |-------------|----------|---------|
-| RunPod | `/runpod-volume/isengard/` | ALL persistent data |
+| RunPod (network volume) | `/workspace/isengard/` | ALL persistent data (default) |
+| RunPod (custom mount) | `/runpod-volume/isengard/` | Legacy/custom volume mount |
 | Local Dev | `./data/` | Uploads, models, outputs |
 | Container | Filesystem | Ephemeral only |
 
-Path resolution via `packages/shared/src/config.py`, never hardcoded.
+**Volume Auto-Detection Order:**
+1. Explicit `VOLUME_ROOT` env var (if set)
+2. `/workspace/isengard` (RunPod network volume default)
+3. `/runpod-volume/isengard` (legacy/custom mount)
+4. `./data` (local fallback)
+
+Path resolution via `packages/shared/src/config.py` and `start.sh`, never hardcoded.
 
 ---
 
@@ -144,14 +151,13 @@ Full-proof the beta on RunPod using persistent network volume storage. The netwo
 All Phase 2 work uses this standardized layout on the RunPod network volume:
 
 ```
-/runpod-volume/
+/workspace/                      # RunPod default network volume mount
 ├── isengard/                    # Standard project root (persistent data)
 │   ├── repo/                    # Git working copy (synced from local)
 │   ├── models/                  # FLUX, LoRA checkpoints
 │   ├── outputs/                 # Generated images, training artifacts
 │   ├── logs/                    # All service logs
 │   │   ├── api/
-│   │   ├── worker/
 │   │   ├── comfyui.log
 │   │   └── phase2/              # Phase 2 specific logs
 │   └── reports/                 # Testing reports and artifacts
@@ -161,41 +167,43 @@ All Phase 2 work uses this standardized layout on the RunPod network volume:
 ```
 
 **Canonical paths:**
-- Network volume mount: `/runpod-volume`
-- Project data root: `/runpod-volume/isengard`
-- Repo working copy: `/runpod-volume/isengard/repo`
-- Test report: `/runpod-volume/isengard/reports/test-report.md`
-- Baseline marker: `/runpod-volume/.baseline-marker`
+- Network volume mount: `/workspace` (RunPod default)
+- Project data root: `/workspace/isengard`
+- Repo working copy: `/workspace/isengard/repo`
+- Test report: `/workspace/isengard/reports/test-report.md`
+- Baseline marker: `/workspace/.baseline-marker`
+
+> **Note:** The start.sh script auto-detects the volume mount point. If you use a custom mount at `/runpod-volume`, it will also work.
 
 ### Phase 2 Workflow (SOP)
 
 #### A. Pod Bring-Up
 
 1. **Start pod with network volume attached**
-   - Ensure volume is mounted at `/runpod-volume`
+   - Ensure volume is mounted at `/workspace` (RunPod default)
 
 2. **Initialize or verify repo working copy**
    ```bash
    # First time: clone from local (via SSH/rsync)
-   rsync -avz --exclude='.git/objects' user@local:/path/to/isengard/ /runpod-volume/isengard/repo/
+   rsync -avz --exclude='.git/objects' user@local:/path/to/isengard/ /workspace/isengard/repo/
 
    # Subsequent: verify copy exists
-   ls -la /runpod-volume/isengard/repo/
+   ls -la /workspace/isengard/repo/
    ```
 
 3. **Create or update baseline marker**
    ```bash
-   cat > /runpod-volume/.baseline-marker << EOF
-   baseline_sha=$(cd /runpod-volume/isengard/repo && git rev-parse HEAD)
+   cat > /workspace/.baseline-marker << EOF
+   baseline_sha=$(cd /workspace/isengard/repo && git rev-parse HEAD)
    synced_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
    pod_id=${RUNPOD_POD_ID:-unknown}
-   volume_path=/runpod-volume/isengard/repo
+   volume_path=/workspace/isengard/repo
    EOF
    ```
 
 4. **Start services**
    ```bash
-   cd /runpod-volume/isengard/repo
+   cd /workspace/isengard/repo
    ./start.sh
    ```
 
@@ -217,7 +225,7 @@ The testing workflow uses two Claude Code instances:
 
 3. Document findings in the canonical report file:
 
-   **File:** `/runpod-volume/isengard/reports/test-report.md`
+   **File:** `/workspace/isengard/reports/test-report.md`
 
    **Format:**
    ```markdown
@@ -269,23 +277,20 @@ The testing workflow uses two Claude Code instances:
 1. **Connect to pod via SSH**
    ```bash
    ssh root@<pod-ip> -p 22
-   cd /runpod-volume/isengard/repo
+   cd /workspace/isengard/repo
    ```
 
 2. **Review logs before fixing** (mandatory)
    ```bash
    # API logs
-   tail -100 /runpod-volume/isengard/logs/api/startup.log
-
-   # Worker logs
-   tail -100 /runpod-volume/isengard/logs/worker/startup.log
+   tail -100 /workspace/isengard/logs/api/startup.log
 
    # ComfyUI logs
-   tail -100 /runpod-volume/isengard/logs/comfyui.log
+   tail -100 /workspace/isengard/logs/comfyui.log
    ```
 
 3. **Apply fix to the volume working copy**
-   - Edit files directly on `/runpod-volume/isengard/repo/`
+   - Edit files directly on `/workspace/isengard/repo/`
    - Restart affected services as needed
 
 4. **Update the test report** with:
@@ -305,10 +310,10 @@ The testing workflow uses two Claude Code instances:
 
 **On the pod:**
 ```bash
-cd /runpod-volume/isengard/repo
+cd /workspace/isengard/repo
 
 # Get baseline SHA from marker
-BASELINE_SHA=$(grep baseline_sha /runpod-volume/.baseline-marker | cut -d= -f2)
+BASELINE_SHA=$(grep baseline_sha /workspace/.baseline-marker | cut -d= -f2)
 
 # Create patch bundle
 git add -A
@@ -351,7 +356,7 @@ Changes:
 - Updated Y in file:line
 
 Tested on pod: <pod-id>
-Report: /runpod-volume/isengard/reports/test-report.md"
+Report: /workspace/isengard/reports/test-report.md"
 
 # Merge to main when ready
 git checkout main
@@ -363,7 +368,7 @@ git merge --no-ff $BRANCH_NAME
 ```bash
 # On local machine
 mkdir -p /tmp/isengard-import
-rsync -avz root@<pod-ip>:/runpod-volume/isengard/repo/ /tmp/isengard-import/
+rsync -avz root@<pod-ip>:/workspace/isengard/repo/ /tmp/isengard-import/
 
 # Compare against local
 git diff --no-index . /tmp/isengard-import/ > /tmp/volume-diff.txt
@@ -377,11 +382,11 @@ git diff --no-index . /tmp/isengard-import/ > /tmp/volume-diff.txt
 ```bash
 ssh root@<pod-ip>
 NEW_SHA=$(cd /path/to/local/repo && git rev-parse main)
-cat > /runpod-volume/.baseline-marker << EOF
+cat > /workspace/.baseline-marker << EOF
 baseline_sha=$NEW_SHA
 synced_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 pod_id=${RUNPOD_POD_ID:-unknown}
-volume_path=/runpod-volume/isengard/repo
+volume_path=/workspace/isengard/repo
 EOF
 ```
 
@@ -397,12 +402,11 @@ EOF
 3. **No Legacy Clutter:** When replacing files, delete the old file or move to `/_legacy_dump/`. This folder is gitignored and dockerignored.
 
 4. **Logs Before Fixes:** ALWAYS check logs before proposing a fix. Phase 2 logs live at:
-   - `/runpod-volume/isengard/logs/api/`
-   - `/runpod-volume/isengard/logs/worker/`
-   - `/runpod-volume/isengard/logs/comfyui.log`
-   - `/runpod-volume/isengard/logs/phase2/` (session-specific)
+   - `/workspace/isengard/logs/api/`
+   - `/workspace/isengard/logs/comfyui.log`
+   - `/workspace/isengard/logs/phase2/` (session-specific)
 
-5. **Report is Mandatory:** The test report at `/runpod-volume/isengard/reports/test-report.md` must be updated for every test session and every fix. This is the audit trail.
+5. **Report is Mandatory:** The test report at `/workspace/isengard/reports/test-report.md` must be updated for every test session and every fix. This is the audit trail.
 
 6. **Commit Before Deploy:** Before deploying a new Docker image, ALL volume changes must be synced back and committed to local main.
 
@@ -465,7 +469,7 @@ GET /api/jobs/{id}/debug-bundle # Download debug ZIP
 |----------|----------|-------------|
 | `ISENGARD_MODE` | Yes | `fast-test` or `production` |
 | `REDIS_URL` | Yes | Redis connection string |
-| `VOLUME_ROOT` | No | Defaults to `/runpod-volume/isengard` |
+| `VOLUME_ROOT` | No | Auto-detected: `/workspace/isengard` or `/runpod-volume/isengard` |
 | `COMFYUI_HOST` | No | ComfyUI bind address (default: `127.0.0.1` - internal only) |
 | `COMFYUI_PORT` | No | ComfyUI port (default: `8188`) |
 | `COMFYUI_URL` | No | Full ComfyUI URL (default: `http://127.0.0.1:8188`) |
@@ -546,9 +550,10 @@ docker build -t isengard:test .
 
 | Service | Log Location |
 |---------|--------------|
-| ComfyUI | `/runpod-volume/isengard/logs/comfyui.log` |
-| API | `/runpod-volume/isengard/logs/api/startup.log` |
-| Worker | `/runpod-volume/isengard/logs/worker/startup.log` |
+| ComfyUI | `$VOLUME_ROOT/logs/comfyui.log` |
+| API | `$VOLUME_ROOT/logs/api/startup.log` |
+
+Note: `$VOLUME_ROOT` is auto-detected as `/workspace/isengard` or `/runpod-volume/isengard`.
 
 ### Internal Ports
 
@@ -578,7 +583,7 @@ This test verifies:
 ### Troubleshooting
 
 **ComfyUI not starting:**
-- Check logs: `docker exec <container> tail -f /runpod-volume/isengard/logs/comfyui.log`
+- Check logs: `docker exec <container> tail -f $VOLUME_ROOT/logs/comfyui.log`
 - Verify models are downloaded: models are on the volume, not in the image
 
 **AI-Toolkit training fails:**

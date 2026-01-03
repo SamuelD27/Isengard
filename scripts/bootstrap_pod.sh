@@ -1,5 +1,12 @@
 #!/bin/bash
 ###############################################################################
+# DEPRECATED: This script is outdated after architecture simplification.
+# Use /start.sh instead (the container entrypoint).
+#
+# Redis and Worker were removed in commit 77f8c3a. Jobs now run in-process
+# via FastAPI BackgroundTasks.
+###############################################################################
+#
 # Isengard Bootstrap v2 - Single Authoritative Pod Startup Script
 # Location: /runpod-volume/isengard/bootstrap_v2.sh
 #
@@ -608,10 +615,13 @@ run_e2e_smoke_test() {
 main() {
     echo ""
     echo "============================================================================="
-    echo "  ISENGARD BOOTSTRAP v2"
-    echo "  $(date)"
+    echo "  DEPRECATED: Use /start.sh instead"
+    echo "  This script is outdated after architecture simplification."
+    echo "  Redis and Worker were removed. Jobs run in-process now."
     echo "============================================================================="
     echo ""
+    echo "Exiting. Run /start.sh for production startup."
+    exit 1
 
     local skip_e2e=false
     local restart_only=false

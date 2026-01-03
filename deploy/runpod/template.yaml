@@ -33,10 +33,11 @@ gpu:
   count: 1
 
 # Volume mount for persistent storage
+# RunPod network volumes mount at /workspace by default
 volume:
   # Create at: https://www.runpod.io/console/user/storage
   size: 100  # GB
-  mountPath: /runpod-volume
+  mountPath: /workspace  # RunPod default - auto-detected by start.sh
 
 # Exposed ports
 ports:
@@ -64,29 +65,18 @@ env:
   - name: ISENGARD_MODE
     value: "production"
 
-  - name: VOLUME_ROOT
-    value: "/runpod-volume/isengard"
-
-  - name: LOG_DIR
-    value: "/runpod-volume/isengard/logs"
+  # VOLUME_ROOT and LOG_DIR are auto-detected by start.sh
+  # They will resolve to /workspace/isengard when network volume is mounted
+  # Uncomment to override auto-detection:
+  # - name: VOLUME_ROOT
+  #   value: "/workspace/isengard"
 
   - name: LOG_LEVEL
     value: "INFO"
 
-  # Redis (local on pod)
-  - name: REDIS_URL
-    value: "redis://localhost:6379"
-
-  # ComfyUI (local on pod)
+  # ComfyUI (internal service, not exposed)
   - name: COMFYUI_URL
     value: "http://localhost:8188"
-
-  - name: USE_REDIS
-    value: "true"
-
-  # Worker name (for multi-worker setups)
-  - name: WORKER_NAME
-    value: "runpod-worker-1"
 
   # Optional: SSH public key for key-based auth
   # If not set, a random password will be generated on startup
@@ -133,10 +123,10 @@ healthCheck:
 #    ps aux | grep python
 #
 # 6. View logs:
-#    tail -f /runpod-volume/isengard/logs/api/startup.log
-#    tail -f /runpod-volume/isengard/logs/worker/startup.log
+#    tail -f /workspace/isengard/logs/api/startup.log
+#    tail -f /workspace/isengard/logs/comfyui.log
 #
 # Troubleshooting:
 # - Models not downloading: Check HF_TOKEN is set correctly
-# - Services not starting: Check /runpod-volume/isengard/logs/
+# - Services not starting: Check /workspace/isengard/logs/
 # - GPU not detected: Run nvidia-smi to verify

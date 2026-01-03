@@ -1,8 +1,8 @@
 # Isengard Repository Status Report
 
-**Date:** 2025-12-27
-**Version:** 0.1.0
-**Status:** Production Ready (Core Features)
+**Date:** 2026-01-01
+**Version:** 0.2.0
+**Status:** Production Ready (Core Features + Vendored Engines)
 
 ---
 
@@ -107,7 +107,17 @@ isengard/
 │   └── reports/
 │       └── 2025-12-27_ui-gaps.md # Implementation report
 │
+├── vendor/                       # Vendored Upstream Repos (Pinned Commits)
+│   ├── VENDOR_PINS.json          # Authoritative version pins
+│   ├── comfyui/                  # ComfyUI (git subtree)
+│   └── ai-toolkit/               # AI-Toolkit (git subtree)
+│
 ├── scripts/
+│   ├── vendor/                   # Vendor management scripts
+│   │   ├── pin_status.sh         # Show current vendor pins
+│   │   └── update_vendor.sh      # Update vendor to new commit
+│   ├── smoke/                    # Smoke tests
+│   │   └── smoke_internal_engines.sh  # Verify vendored engines
 │   ├── dev.sh                    # Development startup
 │   ├── download_models.py        # Model downloader
 │   ├── validate_logs.py          # Log validation
@@ -245,6 +255,69 @@ All workflows use disaggregated architecture:
 
 ---
 
+## Vendored Engines
+
+ComfyUI and AI-Toolkit are **vendored** into the repository at pinned commits for deterministic, reproducible builds. This eliminates runtime cloning and ensures consistent behavior across deployments.
+
+### Current Pins
+
+| Engine | Commit | Pinned Date | Purpose |
+|--------|--------|-------------|---------|
+| ComfyUI | `6ca3d5c0` | 2025-12-31 | Image generation backend (FLUX workflows) |
+| AI-Toolkit | `4d5a649a` | 2025-12-31 | LoRA training backend (FLUX.1-dev identity) |
+
+Authoritative source: `vendor/VENDOR_PINS.json`
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Docker Container                      │
+├─────────────────────────────────────────────────────────┤
+│  EXPOSED (to host):                                     │
+│    - Port 22:   SSH                                     │
+│    - Port 3000: Web GUI (nginx)                         │
+│    - Port 8000: API (direct)                            │
+├─────────────────────────────────────────────────────────┤
+│  INTERNAL (not exposed):                                │
+│    - 127.0.0.1:8188  ComfyUI (vendored, localhost only) │
+│    - 127.0.0.1:6379  Redis                              │
+└─────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+1. **Git Subtree**: Both repos added via `git subtree add --squash`
+2. **Pins File**: `vendor/VENDOR_PINS.json` tracks exact commits
+3. **Docker Build**: `COPY vendor/comfyui /opt/ComfyUI` bakes into image
+4. **No Runtime Clone**: Everything in image, no network at startup
+
+### Management Scripts
+
+```bash
+# Check current pins and status
+./scripts/vendor/pin_status.sh
+
+# Update ComfyUI to new commit
+./scripts/vendor/update_vendor.sh comfyui <commit-or-tag>
+
+# Update AI-Toolkit to new commit
+./scripts/vendor/update_vendor.sh ai-toolkit <commit-or-tag>
+
+# Verify integration
+./scripts/smoke/smoke_internal_engines.sh
+```
+
+### Log Locations
+
+| Service | Path |
+|---------|------|
+| ComfyUI | `/runpod-volume/isengard/logs/comfyui.log` |
+| API | `/runpod-volume/isengard/logs/api/startup.log` |
+| Worker | `/runpod-volume/isengard/logs/worker/startup.log` |
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -252,7 +325,10 @@ All workflows use disaggregated architecture:
 | `ISENGARD_MODE` | `production` or `fast-test` | `production` |
 | `VOLUME_ROOT` | Persistent storage path | `/runpod-volume/isengard` |
 | `REDIS_URL` | Redis connection | `redis://localhost:6379` |
-| `COMFYUI_URL` | ComfyUI API endpoint | `http://localhost:8188` |
+| `COMFYUI_HOST` | ComfyUI bind address | `127.0.0.1` (internal only) |
+| `COMFYUI_PORT` | ComfyUI port | `8188` |
+| `COMFYUI_URL` | Full ComfyUI URL | `http://127.0.0.1:8188` |
+| `AITOOLKIT_PATH` | Vendored AI-Toolkit path | `/app/vendor/ai-toolkit` |
 | `USE_REDIS` | Enable Redis mode | `true` |
 | `HF_TOKEN` | HuggingFace API token | Required for model download |
 
@@ -266,13 +342,15 @@ The `start.sh` script performs:
 2. **Directory Creation** - Create persistent storage structure
 3. **Rclone Setup** - Configure R2 access for model download
 4. **Model Download** - Download FLUX models (R2 first, HF fallback)
-5. **Redis Start** - Start Redis server
-6. **ComfyUI Start** - Start ComfyUI with model symlinks
-7. **API Start** - Start FastAPI backend
+5. **Redis Start** - Start Redis server (localhost only)
+6. **ComfyUI Start** - Start vendored ComfyUI from `/opt/ComfyUI` (localhost only)
+7. **API Start** - Start FastAPI backend (exposed on 8000)
 8. **Frontend Build** - Build React app if needed
-9. **Frontend Start** - Serve static files
-10. **Worker Start** - Start background job processor
-11. **Status Check** - Verify all services running
+9. **Frontend Start** - Serve static files (exposed on 3000)
+10. **Worker Start** - Start background job processor with vendored AI-Toolkit
+11. **Status Check** - Verify all services running via `/ready` endpoint
+
+**Key Point**: No runtime cloning - ComfyUI and AI-Toolkit are baked into the Docker image from `vendor/`.
 
 ---
 
@@ -351,9 +429,20 @@ docker push <registry>/isengard:latest
 
 ---
 
-## Files Changed in This Session
+## Recent Changes
 
-### Frontend (apps/web/src/)
+### Vendor System (v0.2.0 - 2026-01-01)
+- `vendor/VENDOR_PINS.json` - Created authoritative version pins file
+- `vendor/comfyui/` - Vendored ComfyUI at commit 6ca3d5c0
+- `vendor/ai-toolkit/` - Vendored AI-Toolkit at commit 4d5a649a
+- `scripts/vendor/pin_status.sh` - Script to check current pins
+- `scripts/vendor/update_vendor.sh` - Script to update vendor commits
+- `scripts/smoke/smoke_internal_engines.sh` - Integration verification
+- `CLAUDE.md` - Added vendor system documentation
+
+### Previous Session (v0.1.0 - 2025-12-27)
+
+#### Frontend (apps/web/src/)
 - `pages/Characters.tsx` - Added synthetic generation panel
 - `pages/Dataset.tsx` - Created global dataset manager
 - `pages/Training.tsx` - Added presets, advanced params, live logs
@@ -363,19 +452,19 @@ docker push <registry>/isengard:latest
 - `lib/api.ts` - Extended types and endpoints
 - `App.tsx` - Added /dataset route
 
-### Backend (apps/api/src/)
+#### Backend (apps/api/src/)
 - `routes/characters.py` - Added image serve/delete endpoints
 - `routes/generation.py` - Added output file serving
 
-### Workflows (packages/plugins/image/workflows/)
+#### Workflows (packages/plugins/image/workflows/)
 - `flux-dev.json` - Created FLUX-compatible workflow
 - `flux-schnell.json` - Fixed existing workflow
 - `flux-dev-lora.json` - Updated for FLUX + LoRA
 - `flux-schnell-lora.json` - Created new workflow
 
-### Infrastructure
+#### Infrastructure
 - `start.sh` - Updated with unet symlinks, frontend build
 
 ---
 
-*Generated: 2025-12-27*
+*Generated: 2026-01-01*

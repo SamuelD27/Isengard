@@ -51,8 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    # Redis
-    redis-server \
     # Fast downloads
     aria2 \
     unzip \
@@ -158,10 +156,6 @@ COPY packages/ /app/packages/
 COPY apps/api/requirements.txt /app/apps/api/requirements.txt
 RUN uv pip install --system -r /app/apps/api/requirements.txt
 
-# Install worker dependencies
-COPY apps/worker/requirements.txt /app/apps/worker/requirements.txt
-RUN uv pip install --system -r /app/apps/worker/requirements.txt
-
 # Install additional ML dependencies
 RUN uv pip install --system \
     accelerate \
@@ -176,10 +170,6 @@ RUN uv pip install --system \
 
 # Copy application source
 COPY apps/api/src/ /app/apps/api/src/
-COPY apps/worker/src/ /app/apps/worker/src/
-
-# Copy workflow templates
-COPY packages/plugins/image/workflows/ /app/packages/plugins/image/workflows/
 
 # Build web frontend
 COPY apps/web/package.json /app/apps/web/package.json
@@ -199,7 +189,7 @@ COPY deploy/runpod/secrets.sh /secrets.sh
 COPY vendor/VENDOR_PINS.json /app/vendor/VENDOR_PINS.json
 
 # Create version marker for verification
-RUN echo "BOOTSTRAP_VERSION=v3.0.0-vendored BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
+RUN echo "BOOTSTRAP_VERSION=v3.1.0 BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)" > /app/BOOTSTRAP_VERSION \
     && sha256sum /start.sh >> /app/BOOTSTRAP_VERSION \
     && echo "VENDOR_COMFYUI=$(cat /app/vendor/VENDOR_PINS.json | grep -A1 'comfyui' | grep commit | cut -d'"' -f4)" >> /app/BOOTSTRAP_VERSION \
     && echo "VENDOR_AITOOLKIT=$(cat /app/vendor/VENDOR_PINS.json | grep -A1 'ai-toolkit' | grep commit | cut -d'"' -f4)" >> /app/BOOTSTRAP_VERSION
@@ -217,16 +207,22 @@ ENV PYTHONPATH=/app:/app/vendor/ai-toolkit
 ENV PYTHONUNBUFFERED=1
 ENV CUDA_VISIBLE_DEVICES=0
 
-# HuggingFace cache location (on persistent volume)
-ENV HF_HOME=/runpod-volume/isengard/cache/huggingface
-ENV TRANSFORMERS_CACHE=/runpod-volume/isengard/cache/huggingface
-
 # Isengard defaults
+# Note: VOLUME_ROOT is NOT set here - it's auto-detected at runtime by start.sh
+# RunPod network volumes mount at /workspace by default
+# The detection order is: explicit env var > /workspace > /runpod-volume > ./data
 ENV ISENGARD_MODE=production
-ENV VOLUME_ROOT=/runpod-volume/isengard
-ENV LOG_DIR=/runpod-volume/isengard/logs
-ENV REDIS_URL=redis://localhost:6379
-ENV USE_REDIS=true
+
+# HuggingFace cache - set dynamically by start.sh after VOLUME_ROOT detection
+# RunPod: /workspace/isengard/cache/huggingface
+# These are fallback defaults for local development only
+ENV HF_HOME=/tmp/huggingface
+ENV TRANSFORMERS_CACHE=/tmp/huggingface
+
+# Torch and temp directories - set dynamically by start.sh
+# RunPod: /workspace/isengard/cache/torch and /workspace/isengard/tmp
+ENV TORCH_HOME=/tmp/torch
+ENV TMPDIR=/tmp
 
 # ComfyUI internal service configuration
 # IMPORTANT: ComfyUI binds to localhost only - it is NOT exposed externally
@@ -234,7 +230,8 @@ ENV COMFYUI_HOST=127.0.0.1
 ENV COMFYUI_PORT=8188
 ENV COMFYUI_URL=http://127.0.0.1:8188
 
-# AI-Toolkit vendored path
+# AI-Toolkit path - start.sh will clone to /workspace/ai-toolkit if on RunPod
+# Fallback to vendored copy for local development
 ENV AITOOLKIT_PATH=/app/vendor/ai-toolkit
 
 EXPOSE 8000

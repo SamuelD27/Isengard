@@ -6,9 +6,27 @@
 
 set -e
 
-VOLUME_ROOT="/runpod-volume/isengard"
 APP_ROOT="/app"
-COMFYUI_ROOT="/opt/ComfyUI"
+
+# ComfyUI path: prefer /workspace/ComfyUI if exists
+if [ -d "/workspace/ComfyUI" ]; then
+    COMFYUI_ROOT="/workspace/ComfyUI"
+else
+    COMFYUI_ROOT="/opt/ComfyUI"
+fi
+
+# Auto-detect volume root (same logic as start.sh)
+if [ -n "${VOLUME_ROOT:-}" ]; then
+    VOLUME_ROOT="${VOLUME_ROOT}"
+elif [ -d "/workspace" ]; then
+    VOLUME_ROOT="/workspace/isengard"
+elif [ -d "/runpod-volume" ]; then
+    VOLUME_ROOT="/runpod-volume/isengard"
+else
+    VOLUME_ROOT="./data"
+fi
+export VOLUME_ROOT
+
 LOGS_DIR="${VOLUME_ROOT}/logs"
 
 # Colors
@@ -24,13 +42,22 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Load secrets
 source /secrets.sh 2>/dev/null || true
 
-# Set environment
+# Set environment (matching start.sh)
 export PYTHONPATH="${APP_ROOT}"
-export HF_HOME="${VOLUME_ROOT}/.cache/huggingface"
+export HF_HOME="${VOLUME_ROOT}/cache/huggingface"
+export TORCH_HOME="${VOLUME_ROOT}/cache/torch"
+export TMPDIR="${VOLUME_ROOT}/tmp"
 export DATA_DIR="${VOLUME_ROOT}"
 export COMFYUI_URL="http://localhost:8188"
-export REDIS_URL="redis://localhost:6379"
 export PYTHONUNBUFFERED=1
+export ISENGARD_MODE="${ISENGARD_MODE:-production}"
+
+# AI-Toolkit path (prefer workspace if exists)
+if [ -d "/workspace/ai-toolkit" ]; then
+    export AITOOLKIT_PATH="/workspace/ai-toolkit"
+else
+    export AITOOLKIT_PATH="/app/vendor/ai-toolkit"
+fi
 
 restart_api() {
     log_info "Restarting API..."
@@ -43,25 +70,15 @@ restart_api() {
     curl -sf http://localhost:8000/health > /dev/null && log_success "API restarted" || log_error "API failed"
 }
 
-restart_worker() {
-    log_info "Restarting Worker..."
-    pkill -f "apps.worker" 2>/dev/null || true
-    sleep 1
-    cd "${APP_ROOT}"
-    nohup python -m apps.worker.src.main \
-        > "${LOGS_DIR}/worker/worker.log" 2>&1 &
-    sleep 2
-    pgrep -f "apps.worker" > /dev/null && log_success "Worker restarted" || log_error "Worker failed"
-}
-
 restart_comfyui() {
     log_info "Restarting ComfyUI..."
     pkill -f "python.*ComfyUI" 2>/dev/null || true
     pkill -f "main.py.*8188" 2>/dev/null || true
     sleep 2
     cd "${COMFYUI_ROOT}"
-    nohup python main.py --listen 0.0.0.0 --port 8188 \
-        > "${LOGS_DIR}/comfyui/comfyui.log" 2>&1 &
+    # Bind to localhost only (internal service)
+    nohup python main.py --listen 127.0.0.1 --port 8188 \
+        > "${LOGS_DIR}/comfyui.log" 2>&1 &
     sleep 5
     curl -sf http://localhost:8188 > /dev/null && log_success "ComfyUI restarted" || log_error "ComfyUI failed"
 }
@@ -82,9 +99,6 @@ case "${1:-all}" in
     api)
         restart_api
         ;;
-    worker)
-        restart_worker
-        ;;
     comfyui)
         restart_comfyui
         ;;
@@ -94,15 +108,14 @@ case "${1:-all}" in
     all)
         restart_comfyui
         restart_api
-        restart_worker
         restart_web
         ;;
     *)
-        echo "Usage: $0 [api|worker|comfyui|web|all]"
+        echo "Usage: $0 [api|comfyui|web|all]"
         exit 1
         ;;
 esac
 
 echo ""
 echo "Service status:"
-ss -tlnp | grep -E "8188|8000|3000|6379" | awk '{print "  " $4 " " $6}'
+ss -tlnp | grep -E "8188|8000|3000" | awk '{print "  " $4 " " $6}'
