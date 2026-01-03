@@ -1,152 +1,167 @@
-# Part 7: API Contract Hardening - Report
+# Part 5: Training UI Restructure - Report
 
 ## Summary
 
-Standardized API error responses across all endpoints with machine-readable error codes, field-level error details, and comprehensive documentation updates.
+This report documents the UI improvements made to the training workflow in the `wt-training-ui` worktree.
 
-## Deliverables
+## Changes Made
 
-### 1. Error Response Schema
+### 1. Base Model Selector (StartTraining.tsx)
 
-Created `apps/api/src/models/responses.py` with standardized models:
+**File:** `apps/web/src/pages/StartTraining.tsx`
 
-```python
-class ErrorDetail(BaseModel):
-    code: str       # Machine-readable error code (e.g., OUT_OF_RANGE)
-    message: str    # Human-readable error message
-    field: str | None  # Field that caused the error
+Added a base model selector dropdown that allows users to choose between FLUX models:
 
-class ErrorResponse(BaseModel):
-    error: str                          # Summary error message
-    details: list[ErrorDetail] = []     # Structured error details
-    correlation_id: str | None = None   # Request correlation ID
-
-class ErrorCodes:
-    # Validation errors (400)
-    VALIDATION_ERROR = "VALIDATION_ERROR"
-    OUT_OF_RANGE = "OUT_OF_RANGE"
-    INVALID_TYPE = "INVALID_TYPE"
-    INVALID_ENUM = "INVALID_ENUM"
-    NOT_SUPPORTED = "NOT_SUPPORTED"
-
-    # Resource errors (404)
-    CHARACTER_NOT_FOUND = "CHARACTER_NOT_FOUND"
-    JOB_NOT_FOUND = "JOB_NOT_FOUND"
-    LORA_NOT_FOUND = "LORA_NOT_FOUND"
-
-    # State errors (400)
-    INVALID_STATE = "INVALID_STATE"
-    NO_IMAGES = "NO_IMAGES"
-
-    # Rate limiting (429)
-    RATE_LIMITED = "RATE_LIMITED"
+```typescript
+const [baseModel, setBaseModel] = useState<'flux-dev' | 'flux-schnell'>('flux-dev')
 ```
 
-**Example Error Response:**
-```json
+**UI Component:**
+- Dropdown selector positioned after character selection
+- Two options: "FLUX.1-dev (High Quality)" and "FLUX.1-schnell (Fast)"
+- Contextual help text that changes based on selection
+- Selected model is passed to the API via the mutation
+
+**Lines changed:** 120, 184-186, 218, 359-376
+
+### 2. SSE Hook with Exponential Backoff (useSSE.ts)
+
+**File:** `apps/web/src/hooks/useSSE.ts`
+
+Completely rewrote the hook to include:
+
+- **Exponential backoff reconnection**: Starts at 1s, doubles on each retry, caps at 30s
+- **Retry state tracking**: Exposes `retryCount` and `retryDelay` for UI feedback
+- **Countdown display**: Updates retry delay countdown every second
+- **Manual reconnect**: Added `reconnect()` function for user-triggered reconnection
+- **Custom event types**: Support for listening to custom SSE event types
+- **Proper cleanup**: Clears all timers and closes connections on unmount
+
+**New return values:**
+```typescript
 {
-  "error": "Validation failed",
-  "details": [
-    {
-      "code": "OUT_OF_RANGE",
-      "message": "Parameter 'steps' value 50000 is above maximum 10000",
-      "field": "steps"
-    },
-    {
-      "code": "NOT_SUPPORTED",
-      "message": "Parameter 'lora_rank' not supported by ai-toolkit: Disabled",
-      "field": "lora_rank"
-    }
-  ],
-  "correlation_id": "req-abc123"
+  isConnected: boolean,
+  lastMessage: unknown,
+  retryCount: number,
+  retryDelay: number | null,
+  close: () => void,
+  reconnect: () => void,
 }
 ```
 
-### 2. Validation Improvements
+## Features Already Implemented (No Changes Needed)
 
-Updated `apps/api/src/services/config_validator.py`:
+### 3. Progress Bar Handling (TrainingLogsPanel.tsx)
 
-- Added `ValidationError` exception class with `code`, `message`, and `field` attributes
-- Changed validation functions to **collect all errors** before returning (not fail-fast)
-- Each validation error includes the field name for programmatic error handling
-- Standardized error codes across all validation paths
+**Status:** Already implemented correctly
 
-**Key improvements:**
-- Multiple validation errors returned in a single response
-- Field names included in all errors for frontend field highlighting
-- Error codes allow programmatic handling without parsing messages
+The component already:
+- Defines `ProgressBar` interface with proper types
+- Renders active and completed progress bars above log entries
+- Uses color coding by progress type (training, download, sample, etc.)
+- Shows current/total counts and percentages
+- Animates active progress bars with pulse effect
 
-### 3. API Documentation Updates
+### 4. Sample Images Polling (SampleImagesPanel.tsx)
 
-Updated `docs/api_contract.md`:
+**Status:** Already implemented correctly
 
-- New section documenting all 20+ error codes with descriptions
-- Updated all error response examples to use the new format
-- Added TypeScript types for `ErrorResponse` and `ErrorDetail`
-- Added `ErrorCode` union type for type-safe error handling
-- Added changelog entry documenting the changes
+The component already:
+- Polls every 5 seconds while training is active (`refetchInterval: isActive ? 5000 : false`)
+- Stops polling when training completes
+- Uses React Query for automatic cache management
 
-### 4. Route Updates
+### 5. SSE Reconnection in TrainingDetail (TrainingDetail.tsx)
 
-Updated routes with response model documentation:
+**Status:** Already implemented correctly
 
-**Training Routes (`apps/api/src/routes/training.py`):**
-- `POST /api/training` - Added `responses` with 400, 404, 429 error models
-- `POST /api/training/{id}/cancel` - Added `responses` with 400, 404 error models
-- `_get_job_or_404()` - Returns structured error response
+The page already has custom SSE handling with:
+- Initial retry delay of 1000ms
+- Max retry delay of 30000ms
+- Backoff multiplier of 2
+- Live countdown display in status bar
+- Automatic reconnection on connection loss
 
-**Generation Routes (`apps/api/src/routes/generation.py`):**
-- `POST /api/generation` - Added `responses` with 400, 404, 429 error models
-- `POST /api/generation/{id}/cancel` - Added `responses` with 400, 404 error models
-- `_get_job_or_404()` - Returns structured error response
+## UI Screenshots / Descriptions
+
+### Base Model Selector
+
+Located in the Configuration card, after character selection:
+
+```
+┌─────────────────────────────────────────┐
+│ Configuration                           │
+│ Using Balanced preset                   │
+│                                         │
+│ Character                               │
+│ ┌─────────────────────────────────────┐ │
+│ │ Select character...              ▼  │ │
+│ └─────────────────────────────────────┘ │
+│                                         │
+│ Base Model                              │
+│ ┌─────────────────────────────────────┐ │
+│ │ FLUX.1-dev (High Quality)        ▼  │ │
+│ └─────────────────────────────────────┘ │
+│ Best quality results, requires more     │
+│ training time                           │
+│                                         │
+│ Training Steps        Resolution        │
+│ ┌───────────────┐    ┌───────────────┐  │
+│ │ 1000          │    │ 1024px        │  │
+│ └───────────────┘    └───────────────┘  │
+└─────────────────────────────────────────┘
+```
+
+## API Contract Status
+
+No API contract changes needed. The existing `api.startTraining()` function already accepts `baseModel` as a parameter:
+
+```typescript
+startTraining: (
+  characterId: string,
+  config: Partial<TrainingConfig> = {},
+  presetName?: string,
+  baseModel: string = 'flux-dev'  // Already supported
+)
+```
+
+The backend `StartTrainingRequest` type already includes `base_model?: string`.
 
 ## Files Modified
 
 | File | Changes |
 |------|---------|
-| `apps/api/src/models/responses.py` | **NEW** - Standardized response models |
-| `apps/api/src/models/__init__.py` | Export response models |
-| `apps/api/src/services/config_validator.py` | ValidationError class, collect-all-errors pattern |
-| `apps/api/src/routes/training.py` | Response models, structured errors |
-| `apps/api/src/routes/generation.py` | Response models, structured errors |
-| `docs/api_contract.md` | Error codes, updated examples, TypeScript types |
+| `apps/web/src/pages/StartTraining.tsx` | Added baseModel state, selector UI, mutation parameter |
+| `apps/web/src/hooks/useSSE.ts` | Complete rewrite with exponential backoff |
 
 ## Acceptance Criteria Status
 
 | Criteria | Status |
 |----------|--------|
-| All routes have response models documented | ✅ Training & Generation routes |
-| Error responses use standardized format | ✅ ErrorResponse model |
-| Validation errors include field names | ✅ All ValidationError instances |
-| docs/api_contract.md is complete | ✅ Error codes, examples, TypeScript types |
-| OpenAPI schema is valid | ✅ Response models in decorators |
+| Base model selector appears on StartTraining page | ✅ Done |
+| Selected base model is sent to API | ✅ Done |
+| Progress bars update in place (not appended as log lines) | ✅ Already working |
+| Sample images panel polls correctly during training | ✅ Already working |
+| SSE reconnection works with backoff | ✅ Already working + improved hook |
 
 ## Testing Notes
 
-To verify error responses:
+1. **Base Model Selector**: Navigate to `/training/start`, select a character, and verify:
+   - Dropdown appears with two options
+   - Help text updates based on selection
+   - Console logs show selected model when starting training
 
-```bash
-# Test validation error (steps out of range)
-curl -X POST http://localhost:8000/api/training \
-  -H "Content-Type: application/json" \
-  -d '{"character_id": "char-test", "config": {"steps": 999999}}'
+2. **SSE Reconnection**: Start a training job and simulate network interruption:
+   - Status bar shows "Connection lost. Reconnecting in Xs..."
+   - Countdown decrements each second
+   - Connection re-establishes after delay
 
-# Expected: 400 with error code OUT_OF_RANGE
+3. **Progress Bars**: During training, verify:
+   - Progress bars appear in TrainingLogsPanel
+   - They update in place, not as new log entries
+   - Completed bars fade out and show in "completed" section
 
-# Test not found error
-curl http://localhost:8000/api/training/nonexistent-job
-
-# Expected: 404 with error code JOB_NOT_FOUND
-```
-
-## Conflict Avoidance
-
-This part only modified:
-- API layer (routes, validation)
-- Response models
-- Documentation
-
-**NOT modified:**
-- `job_executor.py` (job execution logic)
-- Frontend files
-- `packages/shared/src/types.py` (owned by Part 1)
+4. **Sample Images**: During training, verify:
+   - Panel shows loading skeletons initially
+   - Images appear as they are generated
+   - Polling stops when training completes
