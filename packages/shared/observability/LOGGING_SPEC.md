@@ -249,7 +249,8 @@ Logs are validated using `scripts/validate_logs.py`:
 3. **Timestamp Format** - ISO 8601 compliance
 4. **Level Values** - Only valid levels
 5. **Redaction** - No secret patterns detected
-6. **Correlation** - IDs propagate correctly
+6. **ANSI Codes** - No escape sequences in log files
+7. **Correlation** - IDs propagate correctly
 
 ### Running Validation
 
@@ -288,6 +289,121 @@ python scripts/validate_logs.py --strict
 
 ```json
 {"timestamp":"2025-01-25T14:30:00.100Z","level":"ERROR","service":"api","event":"request.error","correlation_id":"req-abc123","message":"Training request failed","context":{"error":"Character not found","character_id":"char-invalid"},"exception":"Traceback (most recent call last):\n  File \"routes/training.py\", line 45, in start_training\n    character = get_character(character_id)\n  File \"services/characters.py\", line 23, in get_character\n    raise CharacterNotFoundError(character_id)\nCharacterNotFoundError: char-invalid"}
+```
+
+---
+
+## Progress Bar Updates
+
+The logging system supports progress bars that can update in place without flooding the log with duplicate lines.
+
+### Progress Bar Event Schema
+
+Progress bar updates are communicated via the `progress_bar` field in events:
+
+```json
+{
+  "timestamp": "2025-01-25T14:30:05.000Z",
+  "level": "INFO",
+  "service": "worker",
+  "event": "training.step",
+  "message": "Training progress",
+  "context": {
+    "job_id": "train-xyz789",
+    "step": 100,
+    "total_steps": 1000
+  },
+  "progress_bar": {
+    "id": "training-main",
+    "type": "training",
+    "label": "Training",
+    "value": 10.0,
+    "total": 1000,
+    "current": 100
+  }
+}
+```
+
+### Progress Bar Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique identifier for this progress bar (used for updates) |
+| `type` | string | Type: `stage`, `training`, `download`, `upload`, `sample`, `checkpoint` |
+| `label` | string | Human-readable label displayed to user |
+| `value` | float | Progress percentage (0-100) |
+| `total` | int | Total count for display (e.g., bytes, steps) |
+| `current` | int | Current count |
+
+### Progress Bar Types
+
+| Type | Use Case |
+|------|----------|
+| `stage` | Stage completion (e.g., "Loading model...") |
+| `training` | Main training progress with step/total |
+| `download` | Model/file downloads with byte counts |
+| `upload` | File uploads with byte counts |
+| `sample` | Sample generation progress |
+| `checkpoint` | Checkpoint saving progress |
+
+### Frontend Handling
+
+The frontend (TrainingLogsPanel.tsx) handles progress bar updates by:
+
+1. **State Management**: Maintains a `progressBars` state map keyed by `id`
+2. **In-Place Updates**: Updates existing bars instead of appending new log lines
+3. **Completion Handling**: Moves completed bars to a "completed" section
+4. **Type-Based Styling**: Different progress bar types have different visual styles
+
+### Implementation Example
+
+```python
+from packages.shared.src.events import TrainingProgressEvent, ProgressBarType
+
+event = TrainingProgressEvent(
+    job_id="train-xyz789",
+    status="running",
+    step=100,
+    steps_total=1000,
+    progress_pct=10.0,
+    progress_bar_id="training-main",
+    progress_bar_type=ProgressBarType.TRAINING,
+    progress_bar_label="Training LoRA",
+    progress_bar_value=10.0,
+    progress_bar_total=1000,
+    progress_bar_current=100,
+)
+```
+
+---
+
+## ANSI Escape Code Handling
+
+Log files MUST NOT contain ANSI escape codes. These codes (used for terminal colors, cursor movement, progress bars) are stripped by the logging infrastructure before writing to files.
+
+### Why Strip ANSI?
+
+1. **Readability**: ANSI codes appear as garbage in log viewers that don't render them
+2. **RunPod Logs**: The RunPod log viewer doesn't render ANSI, showing raw escape sequences
+3. **Parsing**: JSON log parsers may fail or produce invalid output with raw ANSI codes
+4. **Storage**: ANSI codes waste storage space with no benefit in file logs
+
+### Implementation
+
+The `strip_ansi()` function in `packages/shared/src/logging.py` removes:
+
+- Color codes (e.g., `\x1b[31m` for red)
+- Cursor movement (e.g., `\x1b[2K` for erase line, `\x1b[1G` for cursor position)
+- OSC sequences (e.g., `\x1b]0;title\x07` for window titles)
+- Character set selection (e.g., `\x1b(B`)
+
+### Validation
+
+The `validate_logs.py` script checks for ANSI codes:
+
+```bash
+# Will fail if ANSI codes detected in logs
+python scripts/validate_logs.py --strict
 ```
 
 ---

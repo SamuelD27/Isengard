@@ -8,6 +8,7 @@ Validates log files against the logging specification:
 - Timestamp format
 - Level values
 - Redaction (no secrets)
+- ANSI escape codes (must be stripped)
 - Structure (latest/archive layout)
 
 Usage:
@@ -26,6 +27,23 @@ from typing import NamedTuple
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+# ANSI escape code pattern - exported for reuse
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*[mGKHJsu]|\x1b\].*?\x07|\x1b\([AB]')
+
+
+def validate_no_ansi(log_line: str) -> bool:
+    """
+    Verify log line contains no ANSI escape codes.
+
+    Args:
+        log_line: A single log line (raw string)
+
+    Returns:
+        True if line is clean (no ANSI), False if ANSI codes detected
+    """
+    return not bool(ANSI_ESCAPE_PATTERN.search(log_line))
 
 
 class ValidationResult(NamedTuple):
@@ -55,6 +73,7 @@ class LogValidator:
         re.compile(r"/Users/[a-zA-Z0-9]+/"),  # macOS home paths (unredacted)
         re.compile(r"/home/[a-zA-Z0-9]+/"),  # Linux home paths (unredacted)
     ]
+
 
     # ISO 8601 timestamp pattern
     TIMESTAMP_PATTERN = re.compile(
@@ -119,6 +138,10 @@ class LogValidator:
         for pattern in self.SECRET_PATTERNS:
             if pattern.search(line_str):
                 errors.append(f"Potential unredacted secret found matching: {pattern.pattern}")
+
+        # Check for ANSI escape codes (should never be in log files)
+        if not validate_no_ansi(line):
+            errors.append("ANSI escape codes found in log entry - logs must be plain text")
 
         # Check correlation_id format when present
         if "correlation_id" in entry:
