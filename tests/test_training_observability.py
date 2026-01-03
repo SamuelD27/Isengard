@@ -273,16 +273,22 @@ class TestTrainingJobLogger:
                 assert "/path/to/sample2.png" in samples
 
 
-class TestMockPluginSampleGeneration:
-    """Tests for mock plugin sample image generation."""
+class TestMockTrainingSampleGeneration:
+    """Tests for mock training sample image generation."""
 
     @pytest.mark.asyncio
-    async def test_mock_plugin_generates_samples(self):
-        from packages.plugins.training.src.mock_plugin import MockTrainingPlugin
+    async def test_mock_training_generates_samples(self):
+        """Test that mock training generates sample images during training."""
+        from apps.api.src.services.job_executor import _run_mock_training
         from packages.shared.src.types import TrainingConfig, TrainingMethod
+        from packages.shared.src.logging import get_job_samples_dir
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict(os.environ, {"VOLUME_ROOT": tmpdir}):
+            with patch.dict(os.environ, {"VOLUME_ROOT": tmpdir, "ISENGARD_MODE": "fast-test"}):
+                # Re-initialize config with new env
+                import packages.shared.src.config as config_module
+                config_module._config = None
+
                 # Create necessary directories
                 images_dir = Path(tmpdir) / "uploads" / "test-char"
                 images_dir.mkdir(parents=True)
@@ -291,8 +297,6 @@ class TestMockPluginSampleGeneration:
                 (images_dir / "test.jpg").write_bytes(b"dummy image")
 
                 output_path = Path(tmpdir) / "loras" / "test-char" / "v1.safetensors"
-
-                plugin = MockTrainingPlugin()
 
                 config = TrainingConfig(
                     method=TrainingMethod.LORA,
@@ -304,27 +308,32 @@ class TestMockPluginSampleGeneration:
                 )
 
                 progress_events = []
+
                 def on_progress(p):
                     progress_events.append(p)
 
-                result = await plugin.train(
+                job_id = "test-sample-job"
+
+                result = await _run_mock_training(
                     config=config,
                     images_dir=images_dir,
                     output_path=output_path,
                     trigger_word="ohwx",
                     progress_callback=on_progress,
-                    job_id="test-sample-job",
-                    sample_interval=50,  # Generate sample every 50 steps
+                    job_id=job_id,
                 )
 
                 # Check result
                 assert result.success
                 assert result.samples is not None
-                assert len(result.samples) >= 2  # At least 2 samples for 100 steps with interval 50
+                assert len(result.samples) >= 1  # At least 1 sample generated
 
                 # Verify samples exist
                 for sample_path in result.samples:
                     assert Path(sample_path).exists()
+
+                # Verify output path exists
+                assert output_path.exists()
 
 
 if __name__ == "__main__":

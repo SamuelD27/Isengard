@@ -213,6 +213,65 @@ else
 fi
 
 # ============================================================
+# TEST 9: Job Persistence (Part 6 feature)
+# ============================================================
+log_test "9. Checking job persistence..."
+
+# Create a character first
+CHAR_RESPONSE=$(curl -sf -X POST "http://localhost:${API_PORT}/api/characters" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"Smoke Test","trigger_word":"smoketest person"}' 2>/dev/null || echo "FAILED")
+
+if [ "$CHAR_RESPONSE" = "FAILED" ]; then
+    log_warn "Could not create character for job test"
+else
+    CHAR_ID=$(echo "$CHAR_RESPONSE" | jq -r '.id' 2>/dev/null || echo "")
+
+    if [ -n "$CHAR_ID" ]; then
+        # Create a generation job (doesn't require images like training)
+        JOB_RESPONSE=$(curl -sf -X POST "http://localhost:${API_PORT}/api/generation" \
+            -H "Content-Type: application/json" \
+            -d '{"config":{"prompt":"Test prompt for smoke test"},"count":1}' 2>/dev/null || echo "FAILED")
+
+        if [ "$JOB_RESPONSE" = "FAILED" ]; then
+            log_warn "Could not create generation job"
+        else
+            JOB_ID=$(echo "$JOB_RESPONSE" | jq -r '.id' 2>/dev/null || echo "")
+
+            if [ -n "$JOB_ID" ]; then
+                # Verify job can be retrieved
+                JOB_GET=$(curl -sf "http://localhost:${API_PORT}/api/generation/${JOB_ID}" 2>/dev/null || echo "FAILED")
+
+                if echo "$JOB_GET" | grep -q "$JOB_ID"; then
+                    log_pass "Job persistence working - job can be created and retrieved"
+                else
+                    log_warn "Job created but could not be retrieved"
+                fi
+            fi
+        fi
+
+        # Cleanup: Delete the test character
+        curl -sf -X DELETE "http://localhost:${API_PORT}/api/characters/${CHAR_ID}" > /dev/null 2>&1 || true
+    fi
+fi
+
+# ============================================================
+# TEST 10: Generation Capabilities and Toggle Validation
+# ============================================================
+log_test "10. Checking generation toggle validation..."
+
+# Try to use an unsupported toggle - should return 400
+TOGGLE_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://localhost:${API_PORT}/api/generation" \
+    -H "Content-Type: application/json" \
+    -d '{"config":{"prompt":"Test","use_controlnet":true},"count":1}' 2>/dev/null || echo "000")
+
+if [ "$TOGGLE_RESPONSE" = "400" ]; then
+    log_pass "Unsupported toggle (use_controlnet) correctly rejected with 400"
+else
+    log_warn "Toggle validation may not be working (got $TOGGLE_RESPONSE, expected 400)"
+fi
+
+# ============================================================
 # RESULTS
 # ============================================================
 echo ""

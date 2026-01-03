@@ -146,15 +146,20 @@ def get_training_capabilities() -> dict:
 
 
 def get_generation_capabilities() -> dict:
-    """Return generation capabilities (same for mock and production)."""
+    """Return generation capabilities (same for mock and production).
+
+    Note: ControlNet, IP-Adapter, and FaceDetailer toggles were removed as they
+    are not yet implemented. See CONTRACT_CHANGE_REQUEST.md for future plans.
+    """
     return {
         "backend": "comfyui",
         "model_variants": ["flux-dev", "flux-schnell"],
         "toggles": {
-            "use_upscale": {"supported": True, "description": "2x upscale"},
-            "use_facedetailer": {"supported": False, "description": "Face enhancement"},
-            "use_ipadapter": {"supported": False, "description": "Style transfer"},
-            "use_controlnet": {"supported": False, "description": "Pose guidance"},
+            "use_upscale": {"supported": True, "description": "2x RealESRGAN upscale"},
+            # Future toggles (not yet implemented):
+            # - use_controlnet: Pose/depth guidance (requires ControlNet models + workflows)
+            # - use_ipadapter: Style transfer (requires IP-Adapter models + workflows)
+            # - use_facedetailer: Face enhancement (requires face detection models + workflows)
         },
         "parameters": {
             "width": {"type": "int", "min": 512, "max": 2048, "step": 64, "default": 1024, "wired": True},
@@ -489,6 +494,16 @@ async def _run_aitoolkit_training(
         current_loss = None
         total_steps = config.steps
 
+        # Sample monitoring setup
+        samples_generated: list[str] = []
+        samples_dir = get_job_samples_dir(job_id) if job_id else None
+        aitoolkit_samples_dir = output_dir / job_name / "samples"
+        last_sample_check = time.time()
+        copied_samples: set[str] = set()  # Track already-copied samples
+        SAMPLE_CHECK_INTERVAL = 2.0  # Check every 2 seconds
+        # Regex to parse AI-Toolkit sample filenames: {timestamp}__{step:09d}_{index}.{ext}
+        AITOOLKIT_SAMPLE_PATTERN = re.compile(r".*__(\d+)_(\d+)\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
+
         try:
             import select
             import fcntl
@@ -499,6 +514,7 @@ async def _run_aitoolkit_training(
             fcntl.fcntl(fd, fcntl.F_SETFL, flags | os_module.O_NONBLOCK)
 
             output_buffer = ""
+            latest_sample_path: str | None = None
 
             while process.poll() is None:
                 readable, _, _ = select.select([process.stdout], [], [], 0.5)
@@ -523,29 +539,89 @@ async def _run_aitoolkit_training(
                             if len(output_buffer) > 10000:
                                 output_buffer = output_buffer[-5000:]
 
-                            # Emit progress
-                            if progress_callback and current_step > 0:
-                                progress = TrainingProgress(
-                                    current_step=current_step,
-                                    total_steps=total_steps,
-                                    loss=current_loss,
-                                    message=f"Step {current_step}/{total_steps}",
-                                )
-                                if asyncio.iscoroutinefunction(progress_callback):
-                                    await progress_callback(progress)
-                                else:
-                                    progress_callback(progress)
-
                     except BlockingIOError:
                         pass
 
+                # Check for new samples periodically
+                if samples_dir and time.time() - last_sample_check > SAMPLE_CHECK_INTERVAL:
+                    last_sample_check = time.time()
+                    if aitoolkit_samples_dir.exists():
+                        for sample_file in aitoolkit_samples_dir.iterdir():
+                            if sample_file.name in copied_samples:
+                                continue
+                            match = AITOOLKIT_SAMPLE_PATTERN.match(sample_file.name)
+                            if match:
+                                step_num = int(match.group(1))
+                                sample_idx = int(match.group(2))
+                                # Name format: step_{step:05d}_{idx}.png
+                                dest_name = f"step_{step_num:05d}_{sample_idx}.png"
+                                dest_path = samples_dir / dest_name
+                                try:
+                                    # Copy file (keep original format for now)
+                                    shutil.copy2(sample_file, dest_path)
+                                    copied_samples.add(sample_file.name)
+                                    samples_generated.append(str(dest_path))
+                                    latest_sample_path = str(dest_path)
+                                    logger.info("Copied AI-Toolkit sample", extra={
+                                        "event": "training.sample_copied",
+                                        "source": str(sample_file),
+                                        "dest": str(dest_path),
+                                        "step": step_num,
+                                    })
+                                except Exception as e:
+                                    logger.warning(f"Failed to copy sample: {e}", extra={
+                                        "event": "training.sample_copy_failed",
+                                        "source": str(sample_file),
+                                        "error": str(e),
+                                    })
+
+                # Emit progress
+                if progress_callback and current_step > 0:
+                    progress = TrainingProgress(
+                        current_step=current_step,
+                        total_steps=total_steps,
+                        loss=current_loss,
+                        message=f"Step {current_step}/{total_steps}",
+                        sample_path=latest_sample_path,
+                    )
+                    if asyncio.iscoroutinefunction(progress_callback):
+                        await progress_callback(progress)
+                    else:
+                        progress_callback(progress)
+                    # Clear latest_sample_path after reporting to avoid duplicate notifications
+                    latest_sample_path = None
+
             return_code = process.wait()
+
+            # Final sample check after process completes
+            if samples_dir and aitoolkit_samples_dir.exists():
+                for sample_file in aitoolkit_samples_dir.iterdir():
+                    if sample_file.name in copied_samples:
+                        continue
+                    match = AITOOLKIT_SAMPLE_PATTERN.match(sample_file.name)
+                    if match:
+                        step_num = int(match.group(1))
+                        sample_idx = int(match.group(2))
+                        dest_name = f"step_{step_num:05d}_{sample_idx}.png"
+                        dest_path = samples_dir / dest_name
+                        try:
+                            shutil.copy2(sample_file, dest_path)
+                            copied_samples.add(sample_file.name)
+                            samples_generated.append(str(dest_path))
+                            logger.info("Copied AI-Toolkit sample (final)", extra={
+                                "event": "training.sample_copied",
+                                "dest": str(dest_path),
+                                "step": step_num,
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to copy sample: {e}")
 
             if return_code != 0:
                 return TrainingResult(
                     success=False,
                     error_message=f"AI-Toolkit exited with code {return_code}",
                     training_time_seconds=time.time() - start_time,
+                    samples=samples_generated,
                 )
 
             # Find output file
@@ -555,6 +631,7 @@ async def _run_aitoolkit_training(
                     success=False,
                     error_message="No .safetensors file found after training",
                     training_time_seconds=time.time() - start_time,
+                    samples=samples_generated,
                 )
 
             latest_lora = max(lora_files, key=lambda p: p.stat().st_mtime)
@@ -567,6 +644,7 @@ async def _run_aitoolkit_training(
                 total_steps=current_step,
                 final_loss=current_loss,
                 training_time_seconds=time.time() - start_time,
+                samples=samples_generated,
             )
 
         finally:
@@ -680,8 +758,12 @@ async def _run_comfyui_generation(
                     error_message=f"Cannot connect to ComfyUI at {server_url}",
                 )
 
-            # Select workflow
-            workflow_name = "flux-dev-lora" if lora_path else "flux-schnell"
+            # Select workflow based on model variant, lora, and upscale settings
+            model_variant = config.model_variant or "flux-dev"
+            if lora_path:
+                workflow_name = f"flux-{model_variant.replace('flux-', '')}-lora"
+            else:
+                workflow_name = f"flux-{model_variant.replace('flux-', '')}"
             if config.use_upscale:
                 workflow_name += "-upscale"
 

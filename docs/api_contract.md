@@ -26,18 +26,53 @@ This document defines the API contract between frontend and backend. All endpoin
 
 ## Error Response Format
 
-All errors follow this format:
+All errors follow a standardized format with machine-readable error codes:
 
 ```json
 {
-  "detail": "Human-readable error message"
+  "error": "Validation failed",
+  "details": [
+    {
+      "code": "OUT_OF_RANGE",
+      "message": "Parameter 'steps' value 50000 is above maximum 10000",
+      "field": "steps"
+    }
+  ],
+  "correlation_id": "req-abc123"
 }
 ```
 
-HTTP status codes:
-- `400` - Bad Request (validation errors)
-- `404` - Not Found
-- `429` - Rate Limited
+### Error Codes
+
+| Code | Description |
+|------|-------------|
+| `VALIDATION_ERROR` | Generic validation failure |
+| `OUT_OF_RANGE` | Numeric value outside min/max bounds |
+| `INVALID_TYPE` | Wrong data type provided |
+| `INVALID_VALUE` | Invalid value for field |
+| `INVALID_ENUM` | Value not in allowed options |
+| `MISSING_REQUIRED` | Required field not provided |
+| `NOT_SUPPORTED` | Feature/parameter not supported by backend |
+| `INVALID_FORMAT` | Invalid data format |
+| `INVALID_PATH` | Path traversal or invalid path |
+| `NOT_FOUND` | Generic resource not found |
+| `CHARACTER_NOT_FOUND` | Character does not exist |
+| `JOB_NOT_FOUND` | Job does not exist |
+| `IMAGE_NOT_FOUND` | Image file not found |
+| `LORA_NOT_FOUND` | LoRA model not found |
+| `INVALID_STATE` | Resource in wrong state for operation |
+| `ALREADY_EXISTS` | Resource already exists |
+| `NO_IMAGES` | No training images uploaded |
+| `RATE_LIMITED` | Rate limit exceeded |
+| `INTERNAL_ERROR` | Internal server error |
+| `SERVICE_UNAVAILABLE` | Backend service unavailable |
+| `BACKEND_ERROR` | Backend processing error |
+
+### HTTP Status Codes
+
+- `400` - Bad Request (validation errors, invalid state)
+- `404` - Not Found (resource doesn't exist)
+- `429` - Rate Limited (too many requests)
 - `500` - Internal Server Error
 - `503` - Service Unavailable
 
@@ -183,7 +218,14 @@ Get character by ID.
 **Response 404:**
 ```json
 {
-  "detail": "Character char-xxx not found"
+  "error": "Character not found",
+  "details": [
+    {
+      "code": "CHARACTER_NOT_FOUND",
+      "message": "Character char-xxx not found",
+      "field": "character_id"
+    }
+  ]
 }
 ```
 
@@ -314,14 +356,47 @@ Start a training job.
 **Response 400:**
 ```json
 {
-  "detail": "No training images uploaded for this character"
+  "error": "No training images",
+  "details": [
+    {
+      "code": "NO_IMAGES",
+      "message": "No training images uploaded for this character",
+      "field": "character_id"
+    }
+  ]
+}
+```
+
+**Response 400 (validation):**
+```json
+{
+  "error": "Validation failed",
+  "details": [
+    {
+      "code": "OUT_OF_RANGE",
+      "message": "Parameter 'steps' value 50000 is above maximum 10000",
+      "field": "steps"
+    },
+    {
+      "code": "NOT_SUPPORTED",
+      "message": "Parameter 'lora_rank' not supported by ai-toolkit: Disabled in current config",
+      "field": "lora_rank"
+    }
+  ]
 }
 ```
 
 **Response 404:**
 ```json
 {
-  "detail": "Character char-xxx not found"
+  "error": "Character not found",
+  "details": [
+    {
+      "code": "CHARACTER_NOT_FOUND",
+      "message": "Character char-xxx not found",
+      "field": "character_id"
+    }
+  ]
 }
 ```
 
@@ -353,7 +428,14 @@ Cancel a training job.
 **Response 400:**
 ```json
 {
-  "detail": "Cannot cancel job in completed state"
+  "error": "Invalid job state",
+  "details": [
+    {
+      "code": "INVALID_STATE",
+      "message": "Cannot cancel job in completed state",
+      "field": "status"
+    }
+  ]
 }
 ```
 
@@ -460,7 +542,14 @@ Get job log file.
 **Response 404:**
 ```json
 {
-  "detail": "Job logs not found"
+  "error": "Job not found",
+  "details": [
+    {
+      "code": "JOB_NOT_FOUND",
+      "message": "Job logs not found for job-xxx",
+      "field": "job_id"
+    }
+  ]
 }
 ```
 
@@ -505,7 +594,14 @@ Submit client-side logs.
 **Response 429:**
 ```json
 {
-  "detail": "Rate limit exceeded. Try again in X seconds."
+  "error": "Rate limit exceeded",
+  "details": [
+    {
+      "code": "RATE_LIMITED",
+      "message": "Rate limit exceeded. Try again in 30 seconds.",
+      "field": null
+    }
+  ]
 }
 ```
 
@@ -514,6 +610,43 @@ Submit client-side logs.
 ## TypeScript Types (Frontend)
 
 ```typescript
+// Error response types
+interface ErrorDetail {
+  code: string
+  message: string
+  field: string | null
+}
+
+interface ErrorResponse {
+  error: string
+  details: ErrorDetail[]
+  correlation_id?: string
+}
+
+// Standard error codes
+type ErrorCode =
+  | 'VALIDATION_ERROR'
+  | 'OUT_OF_RANGE'
+  | 'INVALID_TYPE'
+  | 'INVALID_VALUE'
+  | 'INVALID_ENUM'
+  | 'MISSING_REQUIRED'
+  | 'NOT_SUPPORTED'
+  | 'INVALID_FORMAT'
+  | 'INVALID_PATH'
+  | 'NOT_FOUND'
+  | 'CHARACTER_NOT_FOUND'
+  | 'JOB_NOT_FOUND'
+  | 'IMAGE_NOT_FOUND'
+  | 'LORA_NOT_FOUND'
+  | 'INVALID_STATE'
+  | 'ALREADY_EXISTS'
+  | 'NO_IMAGES'
+  | 'RATE_LIMITED'
+  | 'INTERNAL_ERROR'
+  | 'SERVICE_UNAVAILABLE'
+  | 'BACKEND_ERROR'
+
 interface Character {
   id: string
   name: string
@@ -602,4 +735,17 @@ interface GenerationJob {
 
 ---
 
-*Last updated: 2025-01-15*
+## API Contract Changelog
+
+### 2026-01-03 - Error Response Standardization
+
+- Introduced standardized `ErrorResponse` format with machine-readable error codes
+- All error responses now include `error`, `details[]`, and optional `correlation_id`
+- Added `ErrorDetail` structure with `code`, `message`, and `field` properties
+- Defined 20+ standard error codes for consistent programmatic error handling
+- Updated validation to collect multiple errors before returning (not fail-fast)
+- Added response model documentation to OpenAPI schema for training and generation endpoints
+
+---
+
+*Last updated: 2026-01-03*

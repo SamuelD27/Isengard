@@ -68,6 +68,30 @@ def with_correlation_id(func: Callable) -> Callable:
     return wrapper
 
 
+# ANSI escape code pattern - matches all common ANSI sequences
+# Includes: colors, cursor movement, erase commands, etc.
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*[mGKHJsu]|\x1b\].*?\x07|\x1b\([AB]')
+
+
+def strip_ansi(text: str) -> str:
+    """
+    Remove ANSI escape codes from text.
+
+    This strips:
+    - Color codes (e.g., \x1b[31m for red)
+    - Cursor movement (e.g., \x1b[2K for erase line)
+    - OSC sequences (e.g., \x1b]0;title\x07)
+    - Character set selection (e.g., \x1b(B)
+
+    Args:
+        text: String potentially containing ANSI escape codes
+
+    Returns:
+        Clean string with all ANSI codes removed
+    """
+    return ANSI_ESCAPE_PATTERN.sub('', text)
+
+
 # Redaction patterns - compile once for performance
 REDACTION_PATTERNS = [
     (re.compile(r"hf_[A-Za-z0-9]+"), "hf_***REDACTED***"),
@@ -115,12 +139,15 @@ class StructuredFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         # Build base log entry
+        # Strip ANSI codes from message to ensure clean JSON logs
+        message = strip_ansi(record.getMessage())
+
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": record.levelname,
             "service": self.service,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
 
         # Add correlation ID if present
@@ -468,12 +495,15 @@ class JobLogger:
         fields: dict,
     ) -> dict:
         """Build a log record dictionary."""
+        # Strip ANSI codes from message to ensure clean JSONL logs
+        clean_msg = strip_ansi(msg)
+
         record = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": level,
             "service": self.service,
             "job_id": self.job_id,
-            "msg": msg,
+            "msg": clean_msg,
         }
 
         # Add correlation ID if present
@@ -687,14 +717,17 @@ class TrainingJobLogger(JobLogger):
         event = f"subprocess.{stream}"
         level = "DEBUG" if stream == "stdout" else "WARNING"
 
-        record = self._build_record(level, line.rstrip(), event, {"stream": stream})
+        # Strip ANSI codes from subprocess output (tqdm, colorama, etc.)
+        clean_line = strip_ansi(line.rstrip())
+
+        record = self._build_record(level, clean_line, event, {"stream": stream})
         self._append_to_job_log(record)
 
         # Also log to service logger at appropriate level
         if stream == "stderr":
-            self._service_logger.warning(line.rstrip(), extra={"event": event, "job_id": self.job_id})
+            self._service_logger.warning(clean_line, extra={"event": event, "job_id": self.job_id})
         else:
-            self._service_logger.debug(line.rstrip(), extra={"event": event, "job_id": self.job_id})
+            self._service_logger.debug(clean_line, extra={"event": event, "job_id": self.job_id})
 
     def complete(self, output_path: str | Path, training_time_seconds: float, final_loss: float | None = None) -> None:
         """Log training completion."""

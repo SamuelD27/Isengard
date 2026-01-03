@@ -23,6 +23,13 @@ from packages.shared.src.types import (
     JobType,
     JobProgressEvent,
 )
+from ..models.responses import (
+    ErrorResponse,
+    ErrorCodes,
+    HTTP_400_VALIDATION,
+    HTTP_404_NOT_FOUND,
+    HTTP_500_INTERNAL,
+)
 from ..services.config_validator import validate_training_config
 from ..services.job_executor import get_training_capabilities
 from packages.shared.src.rate_limit import rate_limit, RATE_LIMIT_TRAINING
@@ -31,32 +38,47 @@ from ..services.job_executor import (
     execute_training_job,
     get_job_progress_events,
 )
+from ..services.job_store import get_training_store
 
 router = APIRouter()
 logger = get_logger("api.routes.training")
 
-# In-memory job storage
-_training_jobs: dict[str, TrainingJob] = {}
+# Persistent job storage (backed by JSON files on disk)
+# Initialized lazily on first access via get_training_store()
 
 # In-memory character storage reference (imported from characters route)
 from .characters import _characters, _load_all_characters, _save_character, _load_character
 
 
 async def _get_job_or_404(job_id: str) -> TrainingJob:
-    """Get job by ID or raise 404."""
-    if job_id not in _training_jobs:
-        raise HTTPException(status_code=404, detail=f"Training job {job_id} not found")
-    return _training_jobs[job_id]
+    """Get job by ID or raise 404 with structured error."""
+    store = get_training_store()
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                error="Job not found",
+                details=[{
+                    "code": ErrorCodes.JOB_NOT_FOUND,
+                    "message": f"Training job {job_id} not found",
+                    "field": "job_id",
+                }],
+            ).model_dump(),
+        )
+    return job
 
 
 async def _save_job(job: TrainingJob) -> None:
-    """Save job to in-memory storage."""
-    _training_jobs[job.id] = job
+    """Save job to persistent storage."""
+    store = get_training_store()
+    store.save(job)
 
 
 async def _list_jobs(character_id: str | None = None) -> list[TrainingJob]:
-    """List jobs from in-memory storage."""
-    jobs = list(_training_jobs.values())
+    """List jobs from persistent storage."""
+    store = get_training_store()
+    jobs = store.list_all()
     if character_id:
         jobs = [j for j in jobs if j.character_id == character_id]
     jobs.sort(key=lambda j: j.created_at, reverse=True)
@@ -109,7 +131,16 @@ async def list_ongoing_training_jobs():
     return ongoing
 
 
-@router.post("", response_model=TrainingJob, status_code=201)
+@router.post(
+    "",
+    response_model=TrainingJob,
+    status_code=201,
+    responses={
+        400: {"model": ErrorResponse, "description": "Validation error (invalid config or no images)"},
+        404: {"model": ErrorResponse, "description": "Character not found"},
+        429: {"model": ErrorResponse, "description": "Rate limit exceeded"},
+    },
+)
 @rate_limit(**RATE_LIMIT_TRAINING)
 async def start_training(
     http_request: Request,
@@ -121,6 +152,13 @@ async def start_training(
 
     Creates a job and executes it in the background via BackgroundTasks.
     Rate limited to 5 requests per minute.
+
+    Error Codes:
+    - VALIDATION_ERROR: Invalid training configuration
+    - OUT_OF_RANGE: Parameter value outside allowed range
+    - NOT_SUPPORTED: Parameter or feature not supported by backend
+    - CHARACTER_NOT_FOUND: Character does not exist
+    - NO_IMAGES: No training images uploaded for character
     """
     # Ensure characters are loaded
     _load_all_characters()
@@ -146,7 +184,14 @@ async def start_training(
     if character is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Character {request.character_id} not found"
+            detail=ErrorResponse(
+                error="Character not found",
+                details=[{
+                    "code": ErrorCodes.CHARACTER_NOT_FOUND,
+                    "message": f"Character {request.character_id} not found",
+                    "field": "character_id",
+                }],
+            ).model_dump(),
         )
 
     # Check for training images
@@ -155,7 +200,14 @@ async def start_training(
     if not images_dir.exists() or not list(images_dir.glob("*")):
         raise HTTPException(
             status_code=400,
-            detail="No training images uploaded for this character"
+            detail=ErrorResponse(
+                error="No training images",
+                details=[{
+                    "code": ErrorCodes.NO_IMAGES,
+                    "message": "No training images uploaded for this character",
+                    "field": "character_id",
+                }],
+            ).model_dump(),
         )
 
     # Create job with server-generated UUID7-style ID
@@ -174,8 +226,9 @@ async def start_training(
         preset_name=request.preset_name,
     )
 
-    # Save job to in-memory storage
-    await _save_job(job)
+    # Save job to persistent storage
+    store = get_training_store()
+    store.save(job)
 
     # Log job creation
     log_extra = {
@@ -190,10 +243,11 @@ async def start_training(
     logger.info("Training job created", extra=log_extra)
 
     # Execute in-process via BackgroundTasks
+    # Pass the store's internal dict for backwards compatibility with executor
     background_tasks.add_task(
         execute_training_job,
         job=job,
-        jobs_store=_training_jobs,
+        jobs_store=store.get_dict(),
         character_trigger_word=character.trigger_word,
         correlation_id=correlation_id,
     )
@@ -234,15 +288,15 @@ async def stream_training_progress(job_id: str):
         )
         yield {"event": "progress", "data": initial_event.model_dump_json()}
 
-        # Poll in-memory store for updates
+        # Poll persistent store for updates
+        store = get_training_store()
         last_event_count = 0
         while True:
             await asyncio.sleep(0.5)
 
-            if job_id not in _training_jobs:
+            current_job = store.get(job_id)
+            if current_job is None:
                 break
-
-            current_job = _training_jobs[job_id]
 
             # Check for new progress events from executor
             progress_events = get_job_progress_events(job_id)
@@ -253,6 +307,9 @@ async def stream_training_progress(job_id: str):
 
             # Stop streaming when job completes
             if current_job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
+                # Persist final job state to disk
+                store.save(current_job)
+
                 final_event = JobProgressEvent(
                     job_id=job_id,
                     job_type=JobType.TRAINING,
@@ -269,17 +326,35 @@ async def stream_training_progress(job_id: str):
     return EventSourceResponse(event_generator())
 
 
-@router.post("/{job_id}/cancel", response_model=TrainingJob)
+@router.post(
+    "/{job_id}/cancel",
+    response_model=TrainingJob,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid job state for cancellation"},
+        404: {"model": ErrorResponse, "description": "Job not found"},
+    },
+)
 async def cancel_training(job_id: str):
     """
     Cancel a training job.
+
+    Error Codes:
+    - JOB_NOT_FOUND: Training job does not exist
+    - INVALID_STATE: Job cannot be cancelled (already completed/failed/cancelled)
     """
     job = await _get_job_or_404(job_id)
 
     if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot cancel job in {job.status} state"
+            detail=ErrorResponse(
+                error="Invalid job state",
+                details=[{
+                    "code": ErrorCodes.INVALID_STATE,
+                    "message": f"Cannot cancel job in {job.status.value} state",
+                    "field": "status",
+                }],
+            ).model_dump(),
         )
 
     job.status = JobStatus.CANCELLED

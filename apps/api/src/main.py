@@ -19,6 +19,11 @@ from packages.shared.src.logging import configure_logging, get_logger
 
 from .routes import health, characters, training, generation, logs, jobs, uelr, loras
 from .middleware import CorrelationIDMiddleware
+from .services.job_store import (
+    get_training_store,
+    get_generation_store,
+    migrate_jobs_from_logs,
+)
 
 logger = get_logger("api.main")
 
@@ -42,11 +47,37 @@ async def lifespan(app: FastAPI):
     # Ensure directories exist
     config.ensure_directories()
 
+    # Initialize job stores (loads persisted jobs from disk)
+    training_store = get_training_store()
+    generation_store = get_generation_store()
+    logger.info("Job stores initialized", extra={
+        "event": "job_store.loaded",
+        "training_jobs": training_store.count(),
+        "generation_jobs": generation_store.count(),
+    })
+
+    # Migrate any jobs from old log files
+    migration_stats = migrate_jobs_from_logs()
+    if migration_stats["training"] > 0 or migration_stats["generation"] > 0:
+        logger.info("Jobs migrated from logs", extra={
+            "event": "job_store.migration_complete",
+            **migration_stats,
+        })
+
     logger.info("Isengard API ready", extra={
         "event": "system.ready",
     })
 
     yield
+
+    # Persist all job states before shutdown
+    training_flushed = training_store.flush_all()
+    generation_flushed = generation_store.flush_all()
+    logger.info("Job stores flushed on shutdown", extra={
+        "event": "job_store.shutdown_flush",
+        "training_jobs": training_flushed,
+        "generation_jobs": generation_flushed,
+    })
 
     logger.info("Isengard API shutting down", extra={
         "event": "system.shutdown",
