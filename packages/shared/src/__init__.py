@@ -26,6 +26,13 @@ from .types import (
     GenerationProgress,
     GenerationResult,
     JobProgressEvent,
+    # Captioning types
+    CaptioningStyle,
+    CaptioningConfig,
+    CaptioningJob,
+    StartCaptioningRequest,
+    CaptioningProgress,
+    CaptioningResult,
 )
 
 # Plugin interfaces
@@ -33,6 +40,7 @@ from .interfaces import (
     TrainingBackend,
     GenerationBackend,
     VideoBackend,
+    CaptioningBackend,
 )
 
 # Event system types
@@ -78,12 +86,20 @@ __all__ = [
     "GenerateImageRequest",
     "GenerationProgress",
     "GenerationResult",
+    # Captioning types
+    "CaptioningStyle",
+    "CaptioningConfig",
+    "CaptioningJob",
+    "StartCaptioningRequest",
+    "CaptioningProgress",
+    "CaptioningResult",
     # SSE events
     "JobProgressEvent",
     # Plugin interfaces
     "TrainingBackend",
     "GenerationBackend",
     "VideoBackend",
+    "CaptioningBackend",
     # Event system
     "TrainingStage",
     "ProgressBarType",

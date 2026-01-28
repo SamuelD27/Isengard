@@ -1,0 +1,15 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + controlnet,facedetailer workflow",
+  "_description": "Base workflow with controlnet,facedetailer enabled",
+  "_modules": ["controlnet", "facedetailer"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}

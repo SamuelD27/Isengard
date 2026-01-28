@@ -1,0 +1,15 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + ipadapter workflow",
+  "_description": "Base workflow with ipadapter enabled",
+  "_modules": ["ipadapter"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}

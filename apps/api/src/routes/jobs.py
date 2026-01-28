@@ -36,9 +36,8 @@ from packages.shared.src.events import (
     TrainingStage,
 )
 
-# Import in-memory job stores from route modules
-from .training import _training_jobs
-from .generation import _generation_jobs
+# Import job stores (persistent storage backed by JSON files)
+from ..services.job_store import get_training_store, get_generation_store
 
 router = APIRouter()
 logger = get_logger("api.routes.jobs")
@@ -58,14 +57,16 @@ def validate_job_id(job_id: str) -> None:
 
 
 def _get_job_data(job_id: str) -> dict | None:
-    """Get job data from in-memory stores."""
+    """Get job data from persistent job stores."""
     # Check training jobs
-    if job_id in _training_jobs:
-        job = _training_jobs[job_id]
+    training_store = get_training_store()
+    job = training_store.get(job_id)
+    if job is not None:
         return job.model_dump(mode="json")
     # Check generation jobs
-    if job_id in _generation_jobs:
-        job = _generation_jobs[job_id]
+    generation_store = get_generation_store()
+    job = generation_store.get(job_id)
+    if job is not None:
         return job.model_dump(mode="json")
     return None
 

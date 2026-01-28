@@ -1,0 +1,15 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + controlnet workflow",
+  "_description": "Base workflow with controlnet enabled",
+  "_modules": ["controlnet"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}

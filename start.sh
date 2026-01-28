@@ -6,10 +6,14 @@
 # 2. Download required models (R2 first, fallback to HuggingFace)
 # 3. Start all services (API, ComfyUI, nginx)
 
-set -e
+# NOTE: We intentionally do NOT use set -e here.
+# Complex startup scripts with background processes and conditional checks
+# can have commands that return non-zero without being actual errors.
+# Instead, we handle errors explicitly where needed.
 
-# Trap to prevent script from exiting on arithmetic with zero
-# This is needed because ((var++)) returns 1 when var is 0
+# Trap to handle signals gracefully and prevent unexpected exits
+trap 'echo "[SIGNAL] Received signal, ignoring..."; true' SIGHUP SIGPIPE
+trap 'echo "[SHUTDOWN] Received SIGTERM, shutting down..."; exit 0' SIGTERM SIGINT
 
 # ============================================================
 # LOAD SECRETS (from bundled secrets file)
@@ -501,6 +505,51 @@ else
 fi
 
 # ============================================================
+# 4b. DOWNLOAD CAPTIONING MODELS (Florence-2)
+# ============================================================
+header "Downloading Captioning Models"
+
+CAPTIONING_MODELS_DIR="${VOLUME_ROOT}/models/captioning"
+FLORENCE2_DIR="${CAPTIONING_MODELS_DIR}/florence-2-large"
+R2_CAPTIONING_BUCKET="captioning"
+
+mkdir -p "${CAPTIONING_MODELS_DIR}"
+
+# Check if Florence-2 already downloaded
+if [ -f "${FLORENCE2_DIR}/model.safetensors" ] || [ -f "${FLORENCE2_DIR}/pytorch_model.bin" ]; then
+    log_success "Florence-2 model already present"
+else
+    log "Checking R2 for Florence-2 model..."
+
+    # Check if model exists in R2 captioning bucket
+    R2_HAS_FLORENCE=$(rclone ls "r2:${R2_CAPTIONING_BUCKET}/florence-2-large/" 2>/dev/null | grep -c "model" || echo "0")
+
+    if [ "$R2_HAS_FLORENCE" -gt 0 ]; then
+        log "Florence-2 found on R2, downloading..."
+        download_from_r2_bucket() {
+            local bucket="$1"
+            local src="$2"
+            local dst="$3"
+
+            rclone copy "r2:${bucket}/${src}" "${dst}" \
+                ${RCLONE_COPY_FLAGS} 2>&1
+        }
+
+        download_from_r2_bucket "${R2_CAPTIONING_BUCKET}" "florence-2-large" "${FLORENCE2_DIR}"
+        log_success "Florence-2 downloaded from R2"
+    else
+        log "Florence-2 not on R2, will download from HuggingFace on first use"
+        log "  Model: microsoft/Florence-2-large"
+        log "  This will happen automatically when captioning is first used"
+        # Note: The caption_images.py script handles HuggingFace download automatically
+        # We don't pre-download to avoid startup delay if captioning isn't used
+    fi
+fi
+
+# Export path for captioning script
+export FLORENCE2_MODEL_PATH="${FLORENCE2_DIR}"
+
+# ============================================================
 # 5. REDIS (REMOVED - Jobs now run in-process)
 # ============================================================
 # Redis was removed in simplification commit 77f8c3a.
@@ -698,6 +747,7 @@ echo "  FLUX.1-schnell: $([ -f "${COMFYUI_MODELS}/checkpoints/flux1-schnell.safe
 echo "  VAE:            $([ -f "${COMFYUI_MODELS}/vae/ae.safetensors" ] && echo '✓' || echo '✗')"
 echo "  CLIP-L:         $([ -f "${COMFYUI_MODELS}/clip/clip_l.safetensors" ] && echo '✓' || echo '✗')"
 echo "  T5-XXL:         $([ -f "${COMFYUI_MODELS}/clip/t5xxl_fp16.safetensors" ] && echo '✓' || echo '✗')"
+echo "  Florence-2:     $([ -f "${FLORENCE2_DIR}/model.safetensors" ] || [ -f "${FLORENCE2_DIR}/pytorch_model.bin" ] && echo '✓' || echo '○ (on-demand)')"
 echo ""
 
 # ============================================================
@@ -719,12 +769,17 @@ WORKSPACE_AITOOLKIT="/workspace/ai-toolkit"
 if [ -d "/workspace" ]; then
     if [ ! -d "${WORKSPACE_AITOOLKIT}" ]; then
         log "Cloning AI-Toolkit to network volume..."
-        git clone https://github.com/ostris/ai-toolkit.git "${WORKSPACE_AITOOLKIT}" 2>&1 | tail -5
-        log_success "AI-Toolkit cloned to ${WORKSPACE_AITOOLKIT}"
+        if git clone --depth 1 https://github.com/ostris/ai-toolkit.git "${WORKSPACE_AITOOLKIT}" 2>&1 | tail -5; then
+            log_success "AI-Toolkit cloned to ${WORKSPACE_AITOOLKIT}"
+        else
+            log_warn "Failed to clone AI-Toolkit, falling back to vendored copy"
+            export AITOOLKIT_PATH="${AITOOLKIT_PATH:-/app/vendor/ai-toolkit}"
+        fi
     else
         log "AI-Toolkit already exists at ${WORKSPACE_AITOOLKIT}"
     fi
-    export AITOOLKIT_PATH="${WORKSPACE_AITOOLKIT}"
+    # Only set if not already set by fallback
+    export AITOOLKIT_PATH="${AITOOLKIT_PATH:-${WORKSPACE_AITOOLKIT}}"
 else
     export AITOOLKIT_PATH="${AITOOLKIT_PATH:-/app/vendor/ai-toolkit}"
 fi
@@ -741,15 +796,20 @@ WORKSPACE_COMFYUI="/workspace/ComfyUI"
 if [ -d "/workspace" ]; then
     if [ ! -d "${WORKSPACE_COMFYUI}" ]; then
         log "Cloning ComfyUI to network volume..."
-        git clone https://github.com/comfyanonymous/ComfyUI.git "${WORKSPACE_COMFYUI}" 2>&1 | tail -5
-        log_success "ComfyUI cloned to ${WORKSPACE_COMFYUI}"
-        # Install ComfyUI requirements
-        log "Installing ComfyUI requirements..."
-        pip install -q -r "${WORKSPACE_COMFYUI}/requirements.txt" 2>&1 | tail -3 || true
+        if git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git "${WORKSPACE_COMFYUI}" 2>&1 | tail -5; then
+            log_success "ComfyUI cloned to ${WORKSPACE_COMFYUI}"
+            # Install ComfyUI requirements
+            log "Installing ComfyUI requirements..."
+            pip install -q -r "${WORKSPACE_COMFYUI}/requirements.txt" 2>&1 | tail -3 || true
+        else
+            log_warn "Failed to clone ComfyUI, using vendored copy at /opt/ComfyUI"
+            export COMFYUI_PATH="/opt/ComfyUI"
+        fi
     else
         log "ComfyUI already exists at ${WORKSPACE_COMFYUI}"
     fi
-    export COMFYUI_PATH="${WORKSPACE_COMFYUI}"
+    # Only set if not already set by fallback
+    export COMFYUI_PATH="${COMFYUI_PATH:-${WORKSPACE_COMFYUI}}"
 else
     export COMFYUI_PATH="/opt/ComfyUI"
 fi
@@ -824,4 +884,9 @@ echo "    - ComfyUI:    @ ${COMFYUI_DIR}"
 echo "    - AI-Toolkit: @ ${AITOOLKIT_PATH}"
 
 # Keep container running
-tail -f /dev/null
+# Use a while loop for robustness - if tail exits for any reason, restart it
+log "Container staying alive. Press Ctrl+C to stop."
+while true; do
+    sleep 3600 &
+    wait $!
+done

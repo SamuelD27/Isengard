@@ -41,6 +41,7 @@ isengard/
 │   ├── runtime/          # Health checks, entrypoints
 │   └── smoke/            # Integration tests
 ├── patches/              # Vendor patches (if needed)
+├── external_git/         # Cloned repos for research/analysis (gitignored)
 ├── start.sh              # Container entrypoint
 └── Dockerfile
 ```
@@ -422,6 +423,13 @@ EOF
 - [x] Sample image generation during training
 - [x] GPU stats monitoring
 
+### Captioning
+- [x] Florence-2 auto-captioning (local, no API dependency)
+- [x] Structured captions for LoRA training (trigger word prefix)
+- [x] Batch captioning with progress streaming
+- [x] Style detection (photorealistic, anime, 3D, etc.)
+- [x] Caption format: `{trigger} [Style], [Features], [Clothing], [Pose], [Expression], [Background], [Lighting], [Camera Angle]`
+
 ### Image Generation
 - [x] ComfyUI with FLUX workflows
 - [x] 7 aspect ratio presets
@@ -454,6 +462,17 @@ GET /api/training/{id}/stream   # SSE progress
 POST /api/training/{id}/cancel
 ```
 
+### Captioning
+```
+POST /api/captioning                           # Start captioning job
+GET /api/captioning                            # List jobs
+GET /api/captioning/{id}                       # Get job status
+GET /api/captioning/{id}/stream                # SSE progress
+POST /api/captioning/{id}/cancel               # Cancel job
+GET /api/captioning/character/{id}/captions    # Get all captions
+DELETE /api/captioning/character/{id}/captions # Delete all captions
+```
+
 ### Jobs (debugging)
 ```
 GET /api/jobs/{id}/logs/view    # View logs with filtering
@@ -474,6 +493,7 @@ GET /api/jobs/{id}/debug-bundle # Download debug ZIP
 | `COMFYUI_PORT` | No | ComfyUI port (default: `8188`) |
 | `COMFYUI_URL` | No | Full ComfyUI URL (default: `http://127.0.0.1:8188`) |
 | `AITOOLKIT_PATH` | No | Vendored AI-Toolkit path (default: `/app/vendor/ai-toolkit`) |
+| `FLORENCE2_MODEL_PATH` | No | Local path to Florence-2 model (auto-set by start.sh) |
 
 ---
 
@@ -593,6 +613,148 @@ This test verifies:
 **Pins out of date:**
 - Run `./scripts/vendor/pin_status.sh` to check
 - Update with `./scripts/vendor/update_vendor.sh`
+
+---
+
+## Engine Scripts (Shell-Based Calls)
+
+Simple shell scripts serve as the interface between Isengard and AI engines. Worker calls these via subprocess, parses stdout for progress.
+
+### Scripts
+
+```
+scripts/engines/
+├── train_lora.sh           # AI-Toolkit: LoRA training
+├── generate_sample.sh      # AI-Toolkit: sample image during training
+├── generate_image.sh       # ComfyUI: image generation (selects workflow by modules)
+├── generate_synthetic.sh   # ComfyUI: synthetic dataset generation
+├── caption_images.py       # Florence-2: auto-captioning for LoRA datasets
+├── setup_nodes.sh          # Install ComfyUI custom nodes
+└── comfyui/
+    └── workflows/          # 16 fixed JSON workflows (base + module combinations)
+```
+
+### Workflow Selection
+
+User toggles 4 advanced modules in UI: **ControlNet, IPAdapter, FaceDetailer, Upscale**
+
+`generate_image.sh --modules controlnet,facedetailer` → uses `controlnet_facedetailer.json`
+
+16 pre-built workflows cover all combinations (simpler than runtime composition).
+
+### Custom Nodes Setup
+
+```bash
+./scripts/engines/setup_nodes.sh --group minimal      # Core 4 modules
+./scripts/engines/setup_nodes.sh --group generation   # Full generation stack
+./scripts/engines/setup_nodes.sh --group synthetic    # Dataset generation tools
+./scripts/engines/setup_nodes.sh --list               # Show all options
+```
+
+Node sources defined in script, cloned to `$COMFYUI_DIR/custom_nodes/`.
+
+---
+
+## Image Captioning (Florence-2)
+
+Auto-captioning for LoRA training datasets using Microsoft's Florence-2 vision model.
+
+### How It Works
+
+1. **Model**: Florence-2-large runs locally (no API dependency)
+2. **Input**: Character's training images from `$VOLUME_ROOT/uploads/{character_id}/`
+3. **Output**: `.txt` caption files saved alongside each image
+
+### Caption Format
+
+Structured for optimal LoRA training (inspired by LoRACaptioner research):
+
+```
+{trigger_word} [Style], [Notable Features], [Clothing], [Pose], [Expression], [Background], [Lighting], [Camera Angle]
+```
+
+Example:
+```
+ohwx woman photorealistic, long brown hair visible, white blouse and dark jeans, standing with arms crossed, confident smile, modern office interior, soft natural lighting from window, three-quarter view
+```
+
+### Model Storage
+
+| Source | Location |
+|--------|----------|
+| R2 (fast) | `r2:captioning/florence-2-large/` |
+| Local cache | `$VOLUME_ROOT/models/captioning/florence-2-large/` |
+| HuggingFace (fallback) | `microsoft/Florence-2-large` |
+
+### Usage
+
+**Via API:**
+```bash
+# Start captioning job
+curl -X POST http://localhost:8000/api/captioning \
+  -H "Content-Type: application/json" \
+  -d '{"character_id": "char-abc123"}'
+
+# Check progress
+curl http://localhost:8000/api/captioning/{job_id}
+
+# Get captions for a character
+curl http://localhost:8000/api/captioning/character/char-abc123/captions
+```
+
+**Via CLI (direct):**
+```bash
+python scripts/engines/caption_images.py \
+  --input /path/to/images \
+  --trigger "ohwx woman" \
+  --model florence-2-large
+```
+
+---
+
+## External Git Repos (`external_git/`)
+
+This folder is for cloning existing open-source repositories to analyze and learn from. It is **gitignored** and not part of the Isengard codebase.
+
+### Purpose
+
+Clone repos here to study how other projects solve problems we're working on:
+
+| Research Area | What to Look For |
+|---------------|------------------|
+| **LoRA Captioning** | Auto-captioning pipelines, BLIP/CLIP integration, caption file formats |
+| **LoRA Training** | Training configs, dataset preparation, hyperparameter tuning, progress callbacks |
+| **Full-Stack Architecture** | API design, job queuing, real-time updates, plugin systems |
+| **ComfyUI Workflows** | Node arrangements, workflow composition, API integration patterns |
+
+### Usage
+
+```bash
+cd external_git
+
+# Clone a repo for analysis
+git clone https://github.com/example/lora-trainer.git
+
+# Analyze structure
+tree -L 2 lora-trainer/
+
+# Search for patterns
+grep -r "caption" lora-trainer/
+```
+
+### Rules
+
+1. **Never commit external repos** — folder is gitignored
+2. **Document findings** — when you learn something useful, note it in relevant docs or code comments
+3. **Don't copy code directly** — understand patterns and implement Isengard-native solutions
+4. **Clean up periodically** — delete repos after analysis is complete
+
+### Example Repos to Analyze
+
+- `kohya-ss/sd-scripts` — LoRA training reference
+- `bmaltais/kohya_ss` — GUI wrapper patterns
+- `lllyasviel/Fooocus` — simplified ComfyUI frontend
+- `invoke-ai/InvokeAI` — full-stack image gen architecture
 
 ---
 

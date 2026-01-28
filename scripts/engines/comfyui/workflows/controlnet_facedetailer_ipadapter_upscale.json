@@ -1,0 +1,19 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + all modules workflow",
+  "_description": "Base workflow with all advanced modules enabled",
+  "_modules": ["controlnet", "facedetailer", "ipadapter", "upscale"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}",
+    "{{CONTROLNET_IMAGE}}",
+    "{{CONTROLNET_STRENGTH}}",
+    "{{IPADAPTER_IMAGE}}",
+    "{{IPADAPTER_STRENGTH}}"
+  ]
+}

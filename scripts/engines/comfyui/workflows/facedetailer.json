@@ -1,0 +1,15 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + facedetailer workflow",
+  "_description": "Base workflow with facedetailer enabled",
+  "_modules": ["facedetailer"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}

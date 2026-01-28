@@ -1,0 +1,15 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + controlnet,facedetailer,ipadapter workflow",
+  "_description": "Base workflow with controlnet,facedetailer,ipadapter enabled",
+  "_modules": ["controlnet", "facedetailer", "ipadapter"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}

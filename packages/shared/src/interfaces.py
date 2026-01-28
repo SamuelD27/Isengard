@@ -19,6 +19,9 @@ from .types import (
     GenerationConfig,
     GenerationProgress,
     GenerationResult,
+    CaptioningConfig,
+    CaptioningProgress,
+    CaptioningResult,
 )
 
 
@@ -267,5 +270,127 @@ class VideoBackend(ABC):
         Generate video from prompt.
 
         Scaffold - signature will be refined when implemented.
+        """
+        ...
+
+
+class CaptioningBackend(ABC):
+    """
+    Interface for image captioning backends (e.g., Florence-2, BLIP-2).
+
+    Implementations generate structured captions for LoRA training datasets.
+    Captions follow the format optimized for Stable Diffusion / FLUX training:
+
+    {trigger_word} [Style], [Notable Features], [Clothing], [Pose],
+    [Expression], [Background], [Lighting], [Camera Angle]
+
+    Example implementation location: packages/plugins/captioning/florence2.py
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Human-readable backend name (e.g., 'Florence-2', 'BLIP-2')."""
+        ...
+
+    @property
+    @abstractmethod
+    def version(self) -> str:
+        """Backend version string."""
+        ...
+
+    @abstractmethod
+    def get_capabilities(self) -> dict[str, Any]:
+        """
+        Return captioning capabilities schema.
+
+        Returns:
+            Dictionary describing supported features, e.g.:
+            {
+                "models": ["florence-2-base", "florence-2-large"],
+                "max_batch_size": 8,
+                "supports_reference_image": True,
+                "supports_partial_captions": True,
+                "output_formats": ["txt", "json"],
+            }
+        """
+        ...
+
+    @abstractmethod
+    async def validate_config(self, config: CaptioningConfig) -> list[str]:
+        """
+        Validate captioning configuration before starting.
+
+        Args:
+            config: The captioning configuration to validate.
+
+        Returns:
+            List of validation error messages. Empty list means valid.
+        """
+        ...
+
+    @abstractmethod
+    async def caption(
+        self,
+        config: CaptioningConfig,
+        images_dir: Path,
+        trigger_word: str,
+        progress_callback: Callable[[CaptioningProgress], None] | None = None,
+        job_id: str | None = None,
+    ) -> CaptioningResult:
+        """
+        Generate captions for all images in a directory.
+
+        Args:
+            config: Captioning configuration (model, style, etc.)
+            images_dir: Directory containing images to caption
+            trigger_word: Trigger word to prefix all captions
+            progress_callback: Optional callback for progress updates
+            job_id: Optional job ID for logging/correlation
+
+        Returns:
+            CaptioningResult with success status, captions dict, etc.
+
+        Raises:
+            Should NOT raise exceptions - return CaptioningResult with success=False
+            and error_message set instead.
+        """
+        ...
+
+    @abstractmethod
+    async def caption_single(
+        self,
+        image_path: Path,
+        trigger_word: str,
+        config: CaptioningConfig | None = None,
+        reference_image: Path | None = None,
+    ) -> str:
+        """
+        Generate caption for a single image.
+
+        Args:
+            image_path: Path to the image to caption
+            trigger_word: Trigger word to prefix caption
+            config: Optional captioning configuration
+            reference_image: Optional reference image for outfit consistency
+
+        Returns:
+            The generated caption string.
+        """
+        ...
+
+    @abstractmethod
+    async def health_check(self) -> dict[str, Any]:
+        """
+        Check if the backend is healthy and model is loaded.
+
+        Returns:
+            Dictionary with health status, e.g.:
+            {
+                "healthy": True,
+                "model_loaded": True,
+                "model_name": "florence-2-large",
+                "gpu_available": True,
+            }
         """
         ...

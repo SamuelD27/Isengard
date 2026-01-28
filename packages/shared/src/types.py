@@ -26,6 +26,7 @@ class JobType(str, Enum):
     TRAINING = "training"
     IMAGE_GENERATION = "image_generation"
     VIDEO_GENERATION = "video_generation"  # Scaffold only
+    CAPTIONING = "captioning"
 
 
 class TrainingMethod(str, Enum):
@@ -298,6 +299,112 @@ class GenerationResult(BaseModel):
     output_paths: list[str] = Field(default_factory=list, description="Paths to generated images")
     generation_time_seconds: float = Field(0.0, description="Total generation time")
     seed_used: int | None = Field(None, description="Actual seed used for generation")
+    error_message: str | None = Field(None, description="Error message if failed")
+
+
+# ============================================
+# Captioning Types
+# ============================================
+
+class CaptioningStyle(str, Enum):
+    """Style hint for caption generation."""
+    PHOTOREALISTIC = "photorealistic"
+    ANIME = "anime"
+    THREED_RENDERED = "3d-rendered"
+    DIGITAL_ART = "digital-art"
+    AUTO = "auto"  # Let model detect style
+
+
+class CaptioningConfig(BaseModel):
+    """Configuration for image captioning."""
+    model: str = Field("florence-2-large", description="Captioning model to use")
+    style_hint: CaptioningStyle = Field(CaptioningStyle.AUTO, description="Style hint for captions")
+    include_lighting: bool = Field(True, description="Include lighting description")
+    include_camera_angle: bool = Field(True, description="Include camera angle")
+    include_background: bool = Field(True, description="Include background description")
+    include_clothing: bool = Field(True, description="Include clothing description")
+    reference_image: str | None = Field(None, description="Reference image path for outfit consistency")
+    overwrite_existing: bool = Field(False, description="Overwrite existing caption files")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "model": "florence-2-large",
+                "style_hint": "auto",
+                "include_lighting": True,
+                "include_camera_angle": True,
+                "overwrite_existing": False
+            }
+        }
+
+
+class CaptioningJob(BaseModel):
+    """A captioning job."""
+    id: str = Field(..., description="Unique job identifier")
+    character_id: str = Field(..., description="Character being captioned")
+    status: JobStatus = Field(JobStatus.PENDING)
+    config: CaptioningConfig = Field(default_factory=CaptioningConfig)
+    progress: float = Field(0.0, ge=0, le=100, description="Progress percentage")
+    current_image: int = Field(0, description="Current image being processed")
+    total_images: int = Field(0, description="Total images to caption")
+    error_message: str | None = Field(None, description="Error if failed")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = Field(None)
+    completed_at: datetime | None = Field(None)
+    captions_generated: int = Field(0, description="Number of captions successfully generated")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "cap-xyz789",
+                "character_id": "char-abc123",
+                "status": "running",
+                "progress": 45.5,
+                "current_image": 7,
+                "total_images": 15,
+                "captions_generated": 6
+            }
+        }
+
+
+class StartCaptioningRequest(BaseModel):
+    """Request to start captioning."""
+    character_id: str = Field(..., description="Character to caption images for")
+    config: CaptioningConfig = Field(default_factory=CaptioningConfig)
+
+
+class CaptioningProgress(BaseModel):
+    """
+    Progress update from captioning backend.
+
+    Used as the callback parameter type in CaptioningBackend.caption().
+    """
+    current_image: int = Field(..., description="Current image index (0-based)")
+    total_images: int = Field(..., description="Total images to process")
+    current_filename: str = Field("", description="Current image filename")
+    message: str = Field("", description="Human-readable status message")
+
+    @property
+    def progress_pct(self) -> float:
+        """Calculate progress percentage."""
+        if self.total_images == 0:
+            return 0.0
+        return (self.current_image / self.total_images) * 100.0
+
+
+class CaptioningResult(BaseModel):
+    """
+    Result from captioning backend.
+
+    Returned by CaptioningBackend.caption() upon completion.
+    """
+    success: bool = Field(..., description="Whether captioning completed successfully")
+    captions: dict[str, str] = Field(default_factory=dict, description="Map of filename -> caption")
+    total_images: int = Field(0, description="Total images processed")
+    captions_generated: int = Field(0, description="Number of captions successfully generated")
+    captions_skipped: int = Field(0, description="Number of images skipped (existing captions)")
+    captions_failed: int = Field(0, description="Number of images that failed to caption")
+    processing_time_seconds: float = Field(0.0, description="Total processing time")
     error_message: str | None = Field(None, description="Error message if failed")
 
 

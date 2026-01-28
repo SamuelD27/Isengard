@@ -1,0 +1,14 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA base workflow",
+  "_description": "Base workflow: FLUX model with optional LoRA, no advanced modules",
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}

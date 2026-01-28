@@ -1,0 +1,15 @@
+{
+  "_comment": "TODO: Add FLUX + LoRA + upscale workflow",
+  "_description": "Base workflow with upscale enabled",
+  "_modules": ["upscale"],
+  "_placeholders": [
+    "{{PROMPT}}",
+    "{{NEGATIVE_PROMPT}}",
+    "{{LORA_PATH}}",
+    "{{WIDTH}}",
+    "{{HEIGHT}}",
+    "{{STEPS}}",
+    "{{CFG}}",
+    "{{SEED}}"
+  ]
+}
